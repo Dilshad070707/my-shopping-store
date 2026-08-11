@@ -1,3 +1,4 @@
+import React, { useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 
 const PRODUCTS_PER_PAGE = 40;
