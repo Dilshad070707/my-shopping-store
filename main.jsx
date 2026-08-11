@@ -340,8 +340,9 @@ function generateProducts() {
       ((mrp - basePrice) / mrp) * 100
     );
 
-    const images = data.images.map((image) => image);
-
+const images = [
+  data.images[nameIndex % data.images.length]
+];
     products.push({
       id: `p${index}`,
       sku: `MSH-${String(index).padStart(6, "0")}`,
