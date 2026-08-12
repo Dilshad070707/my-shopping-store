@@ -9,6 +9,10 @@ const API =
   import.meta.env.VITE_API_URL ||
   "";
 
+const SITE_MODE =
+  import.meta.env.VITE_SITE_MODE ||
+  "customer";
+
 const DEFAULT_CATEGORIES = [
   "All",
   "Women",
@@ -181,6 +185,15 @@ function StoreApp() {
     setPaymentSubmitting,
   ] = useState(false);
 
+  const [homepage, setHomepage] = useState({
+    settings: {},
+    best_selling: [],
+    featured: [],
+    new_arrivals: [],
+  });
+
+  const [offerOpen, setOfferOpen] = useState(false);
+
   const PRODUCTS_PER_PAGE = 40;
 
   useEffect(() => {
@@ -260,6 +273,7 @@ function StoreApp() {
   useEffect(() => {
     loadProducts();
     loadCategories();
+    loadHomepage();
   }, []);
 
   useEffect(() => {
@@ -281,6 +295,25 @@ function StoreApp() {
     return () =>
       clearTimeout(timer);
   }, [notice]);
+
+  async function loadHomepage() {
+    try {
+      const data = await apiFetch("/api/homepage");
+      setHomepage({
+        settings: data.settings || {},
+        best_selling: data.best_selling || [],
+        featured: data.featured || [],
+        new_arrivals: data.new_arrivals || [],
+      });
+      const settings = data.settings || {};
+      if (settings.offer_enabled && !sessionStorage.getItem("meeshoo_offer_seen")) {
+        setOfferOpen(true);
+        sessionStorage.setItem("meeshoo_offer_seen", "1");
+      }
+    } catch (error) {
+      console.error("Homepage load error:", error);
+    }
+  }
 
   async function loadProducts() {
     try {
@@ -967,9 +1000,7 @@ function StoreApp() {
             <p>
               Shop products directly
               from our live catalog.
-              Products, stock, prices
-              and categories are managed
-              from the Admin Panel.
+              Products, stock, prices and categories are managed for you so shopping stays simple.
             </p>
 
             <button
@@ -988,6 +1019,42 @@ function StoreApp() {
               Shop Now
             </button>
           </div>
+        </div>
+      </section>
+
+      {offerOpen && (
+        <div className="offer-overlay" onClick={() => setOfferOpen(false)}>
+          <div className="offer-popup" onClick={(e) => e.stopPropagation()}>
+            <button className="offer-close" onClick={() => setOfferOpen(false)}>×</button>
+            {homepage.settings.offer_image && <img src={homepage.settings.offer_image} alt="Offer" />}
+            <div className="offer-body">
+              <div className="offer-badge">SPECIAL OFFER</div>
+              <h2>{homepage.settings.offer_title || "Welcome to MeeshooShopping"}</h2>
+              <p>{homepage.settings.offer_text || "Shop our latest deals today."}</p>
+              <button className="hero-button" onClick={() => { setOfferOpen(false); document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"}); }}>
+                {homepage.settings.offer_button || "Shop Now"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <section className="home-section slider-section">
+        <div className="section-title">
+          <h2>{homepage.settings.best_selling_title || "🔥 Best Selling Products"}</h2>
+          <span className="result-count">Swipe to explore</span>
+        </div>
+        <div className="product-slider">
+          {(homepage.best_selling.length ? homepage.best_selling : products.slice(0, 10)).map((product) => (
+            <article className="mini-card" key={`best-${product.id}`} onClick={() => openProduct(product)}>
+              <img src={product.images?.[0] || "https://images.unsplash.com/photo-1472851294608-062f824d29cc?w=900&q=85"} alt={product.name} />
+              <div className="mini-card-body">
+                <strong>{product.name}</strong>
+                <span>★ {product.rating || 4.5}</span>
+                <b>{formatPrice(product.price)}</b>
+              </div>
+            </article>
+          ))}
         </div>
       </section>
 
@@ -1024,7 +1091,7 @@ function StoreApp() {
                   )
                 }
               >
-                {item}
+                <span className="category-icon">{({All:"🛍️",Women:"👗",Men:"👔",Electronics:"📱",Beauty:"💄",Footwear:"👟",Home:"🏠",Kitchen:"🍳",Grocery:"🛒",Accessories:"👜",Kids:"🧸",Sports:"⚽",Bags:"👜",Jewellery:"💎",Watches:"⌚"})[item] || "🛍️"}</span> {item}
               </button>
             )
           )}
@@ -2054,6 +2121,17 @@ function AdminApp() {
     setOrders,
   ] = useState([]);
 
+  const [homepageAdmin, setHomepageAdmin] = useState({
+    offer_enabled: true,
+    offer_title: "Welcome to MeeshooShopping",
+    offer_text: "Special offers are waiting for you.",
+    offer_button: "Shop Now",
+    offer_image: "",
+    best_selling_title: "🔥 Best Selling Products",
+  });
+
+  const [securityLogs, setSecurityLogs] = useState([]);
+
   const [
     payment,
     setPayment,
@@ -2095,6 +2173,8 @@ function AdminApp() {
       loadCustomers();
       loadOrders();
       loadPayment();
+      loadHomepageAdmin();
+      loadSecurityLogs();
     }
   }, [adminToken]);
 
@@ -2235,6 +2315,30 @@ function AdminApp() {
     } catch (err) {
       handleAdminError(err);
     }
+  }
+
+  async function loadHomepageAdmin() {
+    try {
+      const data = await apiFetch("/api/admin/homepage", {headers: adminHeaders()});
+      if (data.homepage) setHomepageAdmin(data.homepage);
+    } catch (err) { handleAdminError(err); }
+  }
+
+  async function saveHomepageAdmin() {
+    try {
+      setFormLoading(true);
+      const data = await apiFetch("/api/admin/homepage", {method:"PUT", headers: adminHeaders(), body: JSON.stringify(homepageAdmin)});
+      setHomepageAdmin(data.homepage);
+      notify("Homepage offer settings saved.");
+    } catch (err) { handleAdminError(err); }
+    finally { setFormLoading(false); }
+  }
+
+  async function loadSecurityLogs() {
+    try {
+      const data = await apiFetch("/api/admin/security-log", {headers: adminHeaders()});
+      setSecurityLogs(data.logs || []);
+    } catch (err) { handleAdminError(err); }
   }
 
   async function loadPayment() {
@@ -2398,6 +2502,10 @@ function AdminApp() {
       active:
         product.active !==
         false,
+
+      best_selling: Boolean(product.best_selling),
+      new_arrival: Boolean(product.new_arrival),
+      featured: Boolean(product.featured),
     });
 
     setTab("products");
@@ -2779,6 +2887,14 @@ function AdminApp() {
               "payment",
               "UPI Payment",
             ],
+            [
+              "homepage",
+              "Homepage & Offers",
+            ],
+            [
+              "security",
+              "Security Log",
+            ],
           ].map(
             ([key, label]) => (
               <button
@@ -3010,6 +3126,12 @@ function AdminApp() {
                       rows="4"
                       placeholder="Product description"
                     />
+                  </div>
+
+                  <div className="checkbox-group">
+                    <label className="checkbox-row"><input type="checkbox" name="best_selling" checked={Boolean(productForm.best_selling)} onChange={(e)=>setProductForm(v=>({...v,best_selling:e.target.checked}))}/> 🔥 Best Selling</label>
+                    <label className="checkbox-row"><input type="checkbox" name="new_arrival" checked={Boolean(productForm.new_arrival)} onChange={(e)=>setProductForm(v=>({...v,new_arrival:e.target.checked}))}/> 🆕 New Arrival</label>
+                    <label className="checkbox-row"><input type="checkbox" name="featured" checked={Boolean(productForm.featured)} onChange={(e)=>setProductForm(v=>({...v,featured:e.target.checked}))}/> ⭐ Featured</label>
                   </div>
 
                   <div className="field">
@@ -3541,6 +3663,31 @@ function AdminApp() {
             </section>
           )}
 
+          {tab === "homepage" && (
+            <section>
+              <AdminTitle title="Homepage & Offers" subtitle="Control the customer homepage popup and featured sections." />
+              <div className="admin-card">
+                <div className="form-grid">
+                  <AdminField label="Offer Title" name="offer_title" value={homepageAdmin.offer_title || ""} onChange={(e)=>setHomepageAdmin(v=>({...v,offer_title:e.target.value}))} />
+                  <AdminField label="Offer Button" name="offer_button" value={homepageAdmin.offer_button || ""} onChange={(e)=>setHomepageAdmin(v=>({...v,offer_button:e.target.value}))} />
+                </div>
+                <div className="field"><label>Offer Text</label><textarea rows="3" value={homepageAdmin.offer_text || ""} onChange={(e)=>setHomepageAdmin(v=>({...v,offer_text:e.target.value}))}/></div>
+                <AdminField label="Offer Image URL" name="offer_image" value={homepageAdmin.offer_image || ""} onChange={(e)=>setHomepageAdmin(v=>({...v,offer_image:e.target.value}))} />
+                <AdminField label="Best Selling Section Title" name="best_selling_title" value={homepageAdmin.best_selling_title || ""} onChange={(e)=>setHomepageAdmin(v=>({...v,best_selling_title:e.target.value}))} />
+                <label className="checkbox-row"><input type="checkbox" checked={Boolean(homepageAdmin.offer_enabled)} onChange={(e)=>setHomepageAdmin(v=>({...v,offer_enabled:e.target.checked}))}/> Show offer popup</label>
+                <button className="primary" onClick={saveHomepageAdmin} disabled={formLoading}>Save Homepage</button>
+              </div>
+            </section>
+          )}
+
+          {tab === "security" && (
+            <section>
+              <AdminTitle title="Security Log" subtitle="Recent admin login attempts. Passwords are never stored here." />
+              <div className="admin-card table-wrap">
+                <table><thead><tr><th>Time</th><th>Email</th><th>IP</th><th>Status</th><th>User Agent</th></tr></thead><tbody>{securityLogs.map(log=><tr key={log.id}><td>{new Date(log.created_at).toLocaleString()}</td><td>{log.email || "—"}</td><td>{log.ip_address || "—"}</td><td>{log.success ? "🟢 Success" : "🔴 Failed"}</td><td>{log.user_agent || "—"}</td></tr>)}</tbody></table></div>
+            </section>
+          )}
+
           {tab ===
             "payment" && (
             <section>
@@ -3782,6 +3929,9 @@ function emptyProduct() {
     description: "",
     images: [""],
     active: true,
+    best_selling: false,
+    new_arrival: false,
+    featured: false,
   };
 }
 
@@ -4478,6 +4628,8 @@ button:disabled {
     height: 58px;
   }
 }
+
+.category-icon{font-size:20px;display:inline-block;margin-right:5px}.offer-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;z-index:9999}.offer-popup{width:min(520px,100%);background:#fff;border-radius:22px;overflow:hidden;box-shadow:0 25px 80px rgba(0,0,0,.3);position:relative}.offer-popup img{width:100%;max-height:240px;object-fit:cover}.offer-body{padding:28px}.offer-body h2{margin:8px 0;font-size:28px}.offer-body p{color:#666;line-height:1.6}.offer-close{position:absolute;right:12px;top:12px;width:38px;height:38px;border:0;border-radius:50%;background:#fff;font-size:26px;cursor:pointer}.offer-badge{font-size:12px;font-weight:800;letter-spacing:.12em;color:#7c3aed}.slider-section{max-width:1200px;margin:28px auto;padding:0 20px}.product-slider{display:flex;gap:16px;overflow-x:auto;padding:4px 2px 14px;scroll-snap-type:x mandatory}.mini-card{min-width:220px;max-width:220px;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.08);scroll-snap-align:start;cursor:pointer}.mini-card img{width:100%;height:190px;object-fit:cover}.mini-card-body{padding:12px;display:grid;gap:7px}.mini-card-body strong{font-size:14px;line-height:1.35}.mini-card-body span{color:#666;font-size:13px}.mini-card-body b{font-size:18px}.checkbox-group{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0}.checkbox-row{display:flex;align-items:center;gap:8px}.table-wrap{overflow:auto}.table-wrap table{width:100%;border-collapse:collapse}.table-wrap th,.table-wrap td{padding:10px;border-bottom:1px solid #eee;text-align:left;font-size:13px}
 `;
 
 /* =====================================================
@@ -4821,18 +4973,10 @@ select {
    ===================================================== */
 
 function RootApp() {
-  const isAdmin =
-    window.location.pathname ===
-      "/admin" ||
-    window.location.pathname.startsWith(
-      "/admin/"
-    );
-
-  return isAdmin ? (
-    <AdminApp />
-  ) : (
-    <StoreApp />
-  );
+  if (SITE_MODE === "admin") return <AdminApp />;
+  if (SITE_MODE === "customer") return <StoreApp />;
+  const isAdmin = window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/");
+  return isAdmin ? <AdminApp /> : <StoreApp />;
 }
 
 ReactDOM.createRoot(

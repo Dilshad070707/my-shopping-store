@@ -7,8 +7,10 @@ const { Pool } = require("pg");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
+app.set("trust proxy", 1);
 
 const PORT = Number(process.env.PORT || 5000);
 
@@ -107,9 +109,17 @@ app.use(
 
 app.use(
   express.json({
-    limit: "12mb",
+    limit: "20mb",
   })
 );
+
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many admin login attempts. Please try again later." },
+});
 
 /* =========================================================
    HELPERS
@@ -223,7 +233,7 @@ function sanitizeImages(images) {
       String(image || "").trim()
     )
     .filter(Boolean)
-    .slice(0, 8);
+    .slice(0, 100);
 }
 
 function productFromRow(row) {
@@ -268,6 +278,10 @@ function productFromRow(row) {
     active: Boolean(
       row.active
     ),
+
+    best_selling: Boolean(row.best_selling),
+    new_arrival: Boolean(row.new_arrival),
+    featured: Boolean(row.featured),
 
     created_at:
       row.created_at,
@@ -586,6 +600,18 @@ async function initializeDatabase() {
         NOT NULL
         DEFAULT TRUE,
 
+      best_selling BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      new_arrival BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      featured BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
       created_at
         TIMESTAMPTZ
         NOT NULL
@@ -608,6 +634,21 @@ async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS
       store_products_active_index
     ON store_products(active)
+  `);
+
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS best_selling BOOLEAN NOT NULL DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS new_arrival BOOLEAN NOT NULL DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS featured BOOLEAN NOT NULL DEFAULT FALSE`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS admin_login_audit (
+      id BIGSERIAL PRIMARY KEY,
+      email VARCHAR(255),
+      ip_address VARCHAR(100),
+      user_agent TEXT,
+      success BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
   `);
 
   /* SETTINGS */
@@ -807,6 +848,22 @@ async function initializeDatabase() {
   }
 
   /* =======================================================
+     DEFAULT HOMEPAGE SETTINGS
+     ======================================================= */
+
+  const existingHomepage = await getSetting("homepage", null);
+  if (!existingHomepage) {
+    await setSetting("homepage", {
+      offer_enabled: true,
+      offer_title: "Welcome to MeeshooShopping",
+      offer_text: "Special offers are waiting for you.",
+      offer_button: "Shop Now",
+      offer_image: "",
+      best_selling_title: "🔥 Best Selling Products",
+    });
+  }
+
+  /* =======================================================
      DEFAULT UPI SETTINGS
      ======================================================= */
 
@@ -914,12 +971,24 @@ app.get(
   }
 );
 
+async function auditAdminLogin(req, email, success) {
+  try {
+    await pool.query(
+      `INSERT INTO admin_login_audit (email, ip_address, user_agent, success) VALUES ($1,$2,$3,$4)`,
+      [email || null, req.ip || req.headers["x-forwarded-for"] || null, String(req.headers["user-agent"] || "").slice(0,1000), success]
+    );
+  } catch (error) {
+    console.error("Admin audit log error:", error.message);
+  }
+}
+
 /* =========================================================
    ADMIN LOGIN
    ========================================================= */
 
 app.post(
   "/api/admin/login",
+  adminLoginLimiter,
   async (req, res) => {
     try {
       const email =
@@ -937,6 +1006,7 @@ app.post(
           ADMIN_EMAIL ||
         !password
       ) {
+        await auditAdminLogin(req, email, false);
         return res
           .status(401)
           .json({
@@ -951,6 +1021,7 @@ app.post(
         );
 
       if (!valid) {
+        await auditAdminLogin(req, email, false);
         return res
           .status(401)
           .json({
@@ -958,6 +1029,8 @@ app.post(
               "Invalid admin email or password.",
           });
       }
+
+      await auditAdminLogin(req, email, true);
 
       const token =
         jwt.sign(
@@ -1184,6 +1257,29 @@ app.get(
     }
   }
 );
+
+/* =========================================================
+   HOMEPAGE
+   ========================================================= */
+app.get("/api/homepage", async (req, res) => {
+  try {
+    const settings = await getSetting("homepage", {
+      offer_enabled: true,
+      offer_title: "Welcome to MeeshooShopping",
+      offer_text: "Special offers are waiting for you.",
+      offer_button: "Shop Now",
+      offer_image: "",
+      best_selling_title: "🔥 Best Selling Products",
+    });
+    const best = await pool.query(`SELECT * FROM store_products WHERE active = TRUE AND best_selling = TRUE ORDER BY updated_at DESC, created_at DESC LIMIT 20`);
+    const featured = await pool.query(`SELECT * FROM store_products WHERE active = TRUE AND featured = TRUE ORDER BY updated_at DESC, created_at DESC LIMIT 20`);
+    const arrivals = await pool.query(`SELECT * FROM store_products WHERE active = TRUE AND new_arrival = TRUE ORDER BY created_at DESC LIMIT 20`);
+    return res.json({ success:true, settings, best_selling: best.rows.map(productFromRow), featured: featured.rows.map(productFromRow), new_arrivals: arrivals.rows.map(productFromRow) });
+  } catch (error) {
+    console.error("Homepage error:", error.message);
+    return res.status(500).json({ message: "Unable to load homepage." });
+  }
+});
 
 /* =========================================================
    CATEGORIES
@@ -2242,6 +2338,10 @@ app.post(
         body.active !==
         false;
 
+      const bestSelling = Boolean(body.best_selling);
+      const newArrival = Boolean(body.new_arrival);
+      const featured = Boolean(body.featured);
+
       if (
         !name ||
         !category ||
@@ -2308,14 +2408,17 @@ app.post(
               stock,
               images,
               description,
-              active
+              active,
+              best_selling,
+              new_arrival,
+              featured
             )
 
           VALUES
             (
               $1,$2,$3,$4,$5,
               $6,$7,$8,$9,$10,
-              $11,$12,$13
+              $11,$12,$13,$14,$15,$16
             )
 
           RETURNING *
@@ -2352,6 +2455,9 @@ app.post(
             description,
 
             active,
+            bestSelling,
+            newArrival,
+            featured,
           ]
         );
 
@@ -2501,6 +2607,10 @@ app.put(
               body.active
             );
 
+      const bestSelling = body.best_selling === undefined ? Boolean(current.best_selling) : Boolean(body.best_selling);
+      const newArrival = body.new_arrival === undefined ? Boolean(current.new_arrival) : Boolean(body.new_arrival);
+      const featured = body.featured === undefined ? Boolean(current.featured) : Boolean(body.featured);
+
       if (
         !name ||
         !category ||
@@ -2568,10 +2678,13 @@ app.put(
             images = $10,
             description = $11,
             active = $12,
+            best_selling = $13,
+            new_arrival = $14,
+            featured = $15,
             updated_at = CURRENT_TIMESTAMP
 
           WHERE
-            id = $13
+            id = $16
 
           RETURNING *
           `,
@@ -2600,6 +2713,9 @@ app.put(
             description,
 
             active,
+            bestSelling,
+            newArrival,
+            featured,
 
             id,
           ]
@@ -2822,6 +2938,22 @@ app.get(
     }
   }
 );
+
+/* =========================================================
+   ADMIN HOMEPAGE SETTINGS / LOGIN AUDIT
+   ========================================================= */
+app.get("/api/admin/homepage", requireAdmin, async (req,res)=>{
+  try { const homepage = await getSetting("homepage", {offer_enabled:true,offer_title:"Welcome to MeeshooShopping",offer_text:"Special offers are waiting for you.",offer_button:"Shop Now",offer_image:"",best_selling_title:"🔥 Best Selling Products"}); return res.json({success:true,homepage}); }
+  catch(error){ return res.status(500).json({message:"Unable to load homepage settings."}); }
+});
+app.put("/api/admin/homepage", requireAdmin, async (req,res)=>{
+  try { const current = await getSetting("homepage",{}); const homepage={...current,...(req.body||{})}; await setSetting("homepage",homepage); return res.json({success:true,homepage}); }
+  catch(error){ return res.status(500).json({message:"Unable to save homepage settings."}); }
+});
+app.get("/api/admin/security-log", requireAdmin, async (req,res)=>{
+  try { const result=await pool.query(`SELECT id,email,ip_address,user_agent,success,created_at FROM admin_login_audit ORDER BY created_at DESC LIMIT 100`); return res.json({success:true,logs:result.rows}); }
+  catch(error){ return res.status(500).json({message:"Unable to load security log."}); }
+});
 
 /* =========================================================
    ADMIN PAYMENT SETTINGS
