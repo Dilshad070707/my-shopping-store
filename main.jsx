@@ -42,15 +42,15 @@ async function apiFetch(
   options = {}
 ) {
   const response = await fetch(
-    `${API}${path}`,
-    {
-      headers: {
-        "Content-Type": "application/json",
-        ...(options.headers || {}),
-      },
-      ...options,
-    }
-  );
+  `${API}${path}`,
+  {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  }
+);
 
   const data =
     await response.json().catch(
