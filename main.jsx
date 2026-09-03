@@ -31,7 +31,6 @@ const DEFAULT_CATEGORIES = [
   "Footwear",
   "Home",
   "Kitchen",
-  "Grocery",
   "Accessories",
   "Kids",
   "Sports",
@@ -72,7 +71,7 @@ function getProductVariants(product) {
       name: String(group?.name || "").trim(),
       options: Array.isArray(group?.options)
         ? group.options.map((option) => ({
-            label: String(option?.label || "").trim(),
+            label: String(option?.label || "").trim(),9
             price: option?.price === null || option?.price === undefined || option?.price === "" ? null : Number(option.price),
           })).filter((option) => option.label)
         : [],
