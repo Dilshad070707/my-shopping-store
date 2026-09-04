@@ -1299,58 +1299,17 @@ function otpHash(email, code) {
 }
 
 async function sendCustomerOtp(email, code) {
-  if (!RESEND_API_KEY) {
-    throw new Error("Email OTP is not configured. Set RESEND_API_KEY and MAIL_FROM on the backend.");
-  }
-
+  if (!RESEND_API_KEY) throw new Error("Email OTP is not configured. Set RESEND_API_KEY and MAIL_FROM on the backend.");
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${RESEND_API_KEY}`,
-      "Content-Type": "application/json"
-    },
+    headers: { "Authorization": `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       from: MAIL_FROM,
       to: [email],
-      subject: "Your MeeshooShopping verification code",
-      text: `Your MeeshooShopping verification code is ${code}.
-
-This code expires in 10 minutes.
-Never share this code with anyone.
-
-If you did not request this code, you can safely ignore this email.
-
-MeeshooShopping
-meeshooshopping.shop`,
-      html: `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <title>MeeshooShopping Verification Code</title>
-</head>
-<body style="margin:0;padding:0;background:#f4f6f8;font-family:Arial,Helvetica,sans-serif;">
-  <div style="max-width:520px;margin:40px auto;padding:20px;">
-    <div style="background:#ffffff;border-radius:16px;padding:32px 24px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.08);">
-      <div style="font-size:28px;font-weight:800;color:#111827;margin-bottom:8px;">MeeshooShopping</div>
-      <div style="font-size:14px;color:#6b7280;margin-bottom:28px;">Email Verification</div>
-      <p style="font-size:16px;color:#374151;margin:0 0 18px;">Your verification code is:</p>
-      <div style="display:inline-block;background:#f3f4f6;border-radius:12px;padding:16px 24px;margin:5px 0 22px;">
-        <span style="font-size:32px;font-weight:800;letter-spacing:8px;color:#111827;">${code}</span>
-      </div>
-      <p style="font-size:14px;color:#6b7280;line-height:1.6;margin:10px 0;">This code expires in <strong>10 minutes</strong>.</p>
-      <p style="font-size:14px;color:#6b7280;line-height:1.6;margin:10px 0 24px;">Never share this code with anyone.</p>
-      <div style="border-top:1px solid #e5e7eb;padding-top:20px;">
-        <p style="font-size:13px;color:#9ca3af;margin:0;">If you did not request this code, you can safely ignore this email.</p>
-      </div>
-      <p style="font-size:13px;color:#9ca3af;margin:22px 0 0;">MeeshooShopping<br>meeshooshopping.shop</p>
-    </div>
-  </div>
-</body>
-</html>`
+      subject: "Your MeeshooShopping login OTP",
+      html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:24px"><h2>MeeshooShopping</h2><p>Your login verification code is:</p><div style="font-size:32px;font-weight:800;letter-spacing:8px;padding:16px;background:#f5f3ff;border-radius:12px;text-align:center">${code}</div><p>This OTP expires in 10 minutes. Do not share it with anyone.</p></div>`
     })
   });
-
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     throw new Error(`Unable to send OTP email.${detail ? ` ${detail.slice(0,180)}` : ""}`);
