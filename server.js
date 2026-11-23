@@ -1,0 +1,3890 @@
+require("dotenv").config();
+
+const express = require("express");
+const cors = require("cors");
+const helmet = require("helmet");
+const { Pool } = require("pg");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const rateLimit = require("express-rate-limit");
+
+const app = express();
+app.set("trust proxy", 1);
+
+const PORT = Number(process.env.PORT || 5000);
+
+const DATABASE_URL = String(
+  process.env.DATABASE_URL || ""
+).trim();
+
+const FRONTEND_URL = String(
+  process.env.FRONTEND_URL || "*"
+).trim();
+
+const JWT_SECRET = String(
+  process.env.JWT_SECRET || ""
+).trim();
+
+const ADMIN_EMAIL = String(
+  process.env.ADMIN_EMAIL || ""
+).trim().toLowerCase();
+
+const ADMIN_PASSWORD = String(
+  process.env.ADMIN_PASSWORD || ""
+);
+
+const ADMIN_PASSWORD_HASH = String(
+  process.env.ADMIN_PASSWORD_HASH || ""
+).trim();
+
+/* =========================================================
+   REQUIRED ENVIRONMENT VARIABLES
+   ========================================================= */
+
+if (!DATABASE_URL) {
+  console.error("FATAL: DATABASE_URL is missing.");
+  process.exit(1);
+}
+
+if (
+  !JWT_SECRET ||
+  !ADMIN_EMAIL ||
+  (!ADMIN_PASSWORD && !ADMIN_PASSWORD_HASH)
+) {
+  console.error(
+    "FATAL: Set JWT_SECRET, ADMIN_EMAIL and ADMIN_PASSWORD."
+  );
+
+  process.exit(1);
+}
+
+/* =========================================================
+   POSTGRESQL
+   ========================================================= */
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+
+  ssl:
+    process.env.NODE_ENV === "production"
+      ? {
+          rejectUnauthorized: false,
+        }
+      : false,
+
+  max: 10,
+
+  idleTimeoutMillis: 30000,
+
+  connectionTimeoutMillis: 10000,
+});
+
+// Fast public-product cache. This only caches API responses in server memory;
+// the PostgreSQL data remains the source of truth and is never deleted.
+const PRODUCT_CACHE_TTL_MS = 300000;
+const HOMEPAGE_CACHE_TTL_MS = 300000;
+let publicProductsCache = new Map();
+let publicProductCountCache = new Map();
+let publicCategoriesCache = null;
+let publicHomepageCache = null;
+
+function clearPublicCatalogCache() {
+  publicProductsCache.clear();
+  publicProductCountCache.clear();
+  publicCategoriesCache = null;
+  publicHomepageCache = null;
+}
+
+/* =========================================================
+   SECURITY / MIDDLEWARE
+   ========================================================= */
+
+app.use(
+  helmet({
+    crossOriginResourcePolicy: {
+      policy: "cross-origin",
+    },
+  })
+);
+
+const allowedOrigins =
+  FRONTEND_URL === "*"
+    ? true
+    : FRONTEND_URL
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+  })
+);
+
+app.use(
+  express.json({
+    limit: "20mb",
+  })
+);
+
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many admin login attempts. Please try again later." },
+});
+
+/* =========================================================
+   HELPERS
+   ========================================================= */
+
+function normalizeEmail(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizePhone(value) {
+  return String(value || "")
+    .replace(/\D/g, "")
+    .slice(-10);
+}
+
+function validateEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function validatePhone(phone) {
+  return /^[6-9]\d{9}$/.test(phone);
+}
+
+function validatePincode(pincode) {
+  return /^\d{6}$/.test(
+    String(pincode || "").trim()
+  );
+}
+
+function money(value) {
+  return Number(
+    Number(value).toFixed(2)
+  );
+}
+
+function positiveInt(value, fallback = 0) {
+  const number = Number(value);
+
+  if (
+    Number.isInteger(number) &&
+    number >= 0
+  ) {
+    return number;
+  }
+
+  return fallback;
+}
+
+function generateId(prefix) {
+  return `${prefix}_${Date.now()}_${crypto
+    .randomBytes(5)
+    .toString("hex")}`;
+}
+
+function sanitizeAddress(address) {
+  return {
+    line1: String(
+      address?.line1 || ""
+    ).trim(),
+
+    city: String(
+      address?.city || ""
+    ).trim(),
+
+    state: String(
+      address?.state || ""
+    ).trim(),
+
+    pincode: String(
+      address?.pincode || ""
+    ).trim(),
+  };
+}
+
+function validateAddress(address) {
+  const clean =
+    sanitizeAddress(address);
+
+  if (!clean.line1) {
+    return "Address is required.";
+  }
+
+  if (!clean.city) {
+    return "City is required.";
+  }
+
+  if (!clean.state) {
+    return "State is required.";
+  }
+
+  if (
+    !validatePincode(
+      clean.pincode
+    )
+  ) {
+    return "A valid 6-digit PIN code is required.";
+  }
+
+  return null;
+}
+
+function sanitizeImages(images) {
+  if (!Array.isArray(images)) {
+    return [];
+  }
+
+  return images
+    .map((image) =>
+      String(image || "").trim()
+    )
+    .filter(Boolean)
+    .slice(0, 200);
+}
+
+function sanitizeColors(colors) {
+  if (!Array.isArray(colors)) return [];
+  return colors.map((entry) => ({
+    name: String(entry?.name || "").trim(),
+    hex: String(entry?.hex || "").trim().slice(0, 20),
+    price: entry?.price === null || entry?.price === undefined || entry?.price === "" ? null : money(entry.price),
+    stock: Math.max(0, Math.floor(Number(entry?.stock || 0))),
+    images: sanitizeImages(entry?.images),
+  })).filter((entry) => entry.name).slice(0, 30);
+}
+
+function sanitizeVariants(variants) {
+  if (!Array.isArray(variants)) return [];
+  const seenGroups = new Set();
+  return variants.map((group) => {
+    const name = String(group?.name || "").trim().slice(0, 60);
+    const rawOptions = Array.isArray(group?.options) ? group.options : [];
+    const seenOptions = new Set();
+    const options = rawOptions.map((option) => ({
+      label: String(option?.label || "").trim().slice(0, 100),
+      price: option?.price === null || option?.price === undefined || option?.price === "" ? null : money(option.price),
+    })).filter((option) => {
+      if (!option.label || seenOptions.has(option.label.toLowerCase())) return false;
+      seenOptions.add(option.label.toLowerCase());
+      return true;
+    });
+    return { name, options };
+  }).filter((group) => {
+    const key = group.name.toLowerCase();
+    if (!group.name || !group.options.length || seenGroups.has(key)) return false;
+    seenGroups.add(key);
+    return true;
+  }).slice(0, 12);
+}
+
+function sanitizeSpecifications(specifications) {
+  if (!Array.isArray(specifications)) return [];
+  return specifications.map((entry) => ({
+    key: String(entry?.key || "").trim(),
+    value: String(entry?.value || "").trim(),
+  })).filter((entry) => entry.key && entry.value).slice(0, 80);
+}
+
+function sanitizeSizes(sizes) {
+  if (!Array.isArray(sizes)) return [];
+
+  const seen = new Set();
+
+  return sizes
+    .map((entry) => {
+      const size = String(entry?.size || "").trim().toUpperCase();
+      const stock = Math.max(0, Math.floor(Number(entry?.stock || 0)));
+      const rawPrice = entry?.price;
+      const price = rawPrice === null || rawPrice === undefined || rawPrice === ""
+        ? null
+        : money(rawPrice);
+      return { size, stock, price };
+    })
+    .filter((entry) => {
+      if (!entry.size || seen.has(entry.size)) return false;
+      seen.add(entry.size);
+      return true;
+    })
+    .slice(0, 30);
+}
+
+function totalSizeStock(sizes) {
+  return sanitizeSizes(sizes).reduce((sum, entry) => sum + Number(entry.stock || 0), 0);
+}
+
+function getSizeEntry(sizes, requestedSize) {
+  const clean = String(requestedSize || "").trim().toUpperCase();
+  if (!clean) return null;
+  return sanitizeSizes(sizes).find((entry) => entry.size === clean) || null;
+}
+
+function slugify(value) {
+  return String(value || "")
+    .trim().toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 120);
+}
+
+function productFromRow(row) {
+  return {
+    id: row.id,
+
+    name: row.name,
+
+    sku: row.sku,
+
+    slug: row.slug || slugify(row.sku || row.id),
+
+    category: row.category,
+
+    gender: row.gender || "",
+
+    subcategory: row.subcategory || "",
+
+    price: Number(row.price),
+
+    mrp: Number(row.mrp),
+
+    discount: Number(
+      row.discount
+    ),
+
+    rating: Number(
+      row.rating
+    ),
+
+    reviews: Number(
+      row.reviews
+    ),
+
+    stock: Number(
+      row.stock
+    ),
+
+    colors: Array.isArray(row.colors) ? row.colors.map((entry) => ({
+      name: String(entry?.name || "").trim(),
+      hex: String(entry?.hex || "").trim(),
+      price: entry?.price === null || entry?.price === undefined || entry?.price === "" ? null : Number(entry.price),
+      stock: Math.max(0, Math.floor(Number(entry?.stock || 0))),
+      images: Array.isArray(entry?.images) ? entry.images : [],
+    })).filter((entry) => entry.name) : [],
+
+    variants: sanitizeVariants(row.variants),
+
+    specifications: Array.isArray(row.specifications) ? row.specifications : [],
+    manufacturer_info: row.manufacturer_info || "",
+    warranty: row.warranty || "",
+
+    sizes: Array.isArray(row.sizes)
+      ? row.sizes.map((entry) => ({
+          size: String(entry?.size || "").trim().toUpperCase(),
+          stock: Math.max(0, Math.floor(Number(entry?.stock || 0))),
+          price: entry?.price === null || entry?.price === undefined || entry?.price === ""
+            ? null
+            : Number(entry.price),
+        })).filter((entry) => entry.size)
+      : [],
+
+    images: Array.isArray(
+      row.images
+    )
+      ? row.images
+      : [],
+
+    description:
+      row.description || "",
+
+    active: Boolean(
+      row.active
+    ),
+
+    best_selling: Boolean(row.best_selling),
+    new_arrival: Boolean(row.new_arrival),
+    featured: Boolean(row.featured),
+
+    created_at:
+      row.created_at,
+
+    updated_at:
+      row.updated_at,
+  };
+}
+
+/* =========================================================
+   ADMIN AUTH
+   ========================================================= */
+
+function adminTokenPayload() {
+  return {
+    role: "admin",
+    email: ADMIN_EMAIL,
+  };
+}
+
+function requireAdmin(
+  req,
+  res,
+  next
+) {
+  try {
+    const header = String(
+      req.headers.authorization || ""
+    );
+
+    const token =
+      header.startsWith(
+        "Bearer "
+      )
+        ? header
+            .slice(7)
+            .trim()
+        : "";
+
+    if (!token) {
+      return res.status(401).json({
+        message:
+          "Admin login required.",
+      });
+    }
+
+    const decoded =
+      jwt.verify(
+        token,
+        JWT_SECRET
+      );
+
+    if (
+      decoded?.role !==
+        "admin" ||
+      decoded?.email !==
+        ADMIN_EMAIL
+    ) {
+      return res.status(403).json({
+        message:
+          "Invalid admin session.",
+      });
+    }
+
+    req.admin = decoded;
+
+    next();
+  } catch {
+    return res.status(401).json({
+      message:
+        "Admin session expired. Please login again.",
+    });
+  }
+}
+
+async function passwordMatches(
+  password
+) {
+  if (ADMIN_PASSWORD_HASH) {
+    return bcrypt.compare(
+      password,
+      ADMIN_PASSWORD_HASH
+    );
+  }
+
+  const a = Buffer.from(
+    String(password)
+  );
+
+  const b = Buffer.from(
+    String(ADMIN_PASSWORD)
+  );
+
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    a,
+    b
+  );
+}
+
+/* =========================================================
+   SETTINGS
+   ========================================================= */
+
+async function getSetting(
+  key,
+  fallback = null
+) {
+  const result =
+    await pool.query(
+      `
+      SELECT value
+      FROM store_settings
+      WHERE key = $1
+      `,
+      [key]
+    );
+
+  if (!result.rows.length) {
+    return fallback;
+  }
+
+  return result.rows[0].value;
+}
+
+async function setSetting(
+  key,
+  value
+) {
+  await pool.query(
+    `
+    INSERT INTO store_settings
+      (key, value, updated_at)
+    VALUES
+      ($1, $2::jsonb, CURRENT_TIMESTAMP)
+
+    ON CONFLICT (key)
+    DO UPDATE SET
+      value = EXCLUDED.value,
+      updated_at = CURRENT_TIMESTAMP
+    `,
+    [
+      key,
+      JSON.stringify(value),
+    ]
+  );
+}
+
+/* =========================================================
+   DATABASE INITIALIZATION
+   ========================================================= */
+
+async function initializeDatabase() {
+  /* USERS */
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS store_users (
+      id SERIAL PRIMARY KEY,
+
+      email VARCHAR(255)
+        UNIQUE NOT NULL,
+
+      name VARCHAR(150),
+
+      phone VARCHAR(20),
+
+      created_at
+        TIMESTAMPTZ
+        NOT NULL
+        DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  /* ORDERS */
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS store_orders (
+      id VARCHAR(100) PRIMARY KEY,
+
+      email VARCHAR(255)
+        NOT NULL,
+
+      customer_name VARCHAR(150)
+        NOT NULL,
+
+      phone VARCHAR(20)
+        NOT NULL,
+
+      address JSONB
+        NOT NULL,
+
+      items JSONB
+        NOT NULL,
+
+      amount NUMERIC(10,2)
+        NOT NULL,
+
+      payment_status VARCHAR(30)
+        NOT NULL
+        DEFAULT 'PENDING_PAYMENT',
+
+      payment_method VARCHAR(30)
+        NOT NULL
+        DEFAULT 'UPI',
+
+      transaction_reference VARCHAR(150),
+
+      payment_screenshot_url TEXT,
+
+      payment_id VARCHAR(150),
+
+      order_status VARCHAR(30)
+        NOT NULL
+        DEFAULT 'NEW',
+
+      admin_note TEXT,
+
+      stock_released BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      cashfree_order_id VARCHAR(100),
+
+      created_at
+        TIMESTAMPTZ
+        NOT NULL
+        DEFAULT CURRENT_TIMESTAMP,
+
+      updated_at
+        TIMESTAMPTZ
+        NOT NULL
+        DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  /* MIGRATE OLD ORDERS */
+
+  await pool.query(`
+    ALTER TABLE store_orders
+
+      ADD COLUMN IF NOT EXISTS
+        payment_method VARCHAR(30)
+        NOT NULL
+        DEFAULT 'UPI',
+
+      ADD COLUMN IF NOT EXISTS
+        transaction_reference VARCHAR(150),
+
+      ADD COLUMN IF NOT EXISTS
+        payment_screenshot_url TEXT,
+
+      ADD COLUMN IF NOT EXISTS
+        order_status VARCHAR(30)
+        NOT NULL
+        DEFAULT 'NEW',
+
+      ADD COLUMN IF NOT EXISTS
+        admin_note TEXT,
+
+      ADD COLUMN IF NOT EXISTS
+        stock_released BOOLEAN
+        NOT NULL
+        DEFAULT FALSE
+  `);
+
+  /* PRODUCTS */
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS store_products (
+      id VARCHAR(100)
+        PRIMARY KEY,
+
+      name VARCHAR(255)
+        NOT NULL,
+
+      sku VARCHAR(100)
+        UNIQUE,
+
+      category VARCHAR(100)
+        NOT NULL,
+
+      price NUMERIC(10,2)
+        NOT NULL,
+
+      mrp NUMERIC(10,2)
+        NOT NULL,
+
+      discount NUMERIC(5,2)
+        NOT NULL
+        DEFAULT 0,
+
+      rating NUMERIC(3,1)
+        NOT NULL
+        DEFAULT 4.5,
+
+      reviews INTEGER
+        NOT NULL
+        DEFAULT 0,
+
+      stock INTEGER
+        NOT NULL
+        DEFAULT 0,
+
+      sizes JSONB
+        NOT NULL
+        DEFAULT '[]'::jsonb,
+
+      colors JSONB
+        NOT NULL
+        DEFAULT '[]'::jsonb,
+
+      variants JSONB
+        NOT NULL
+        DEFAULT '[]'::jsonb,
+
+      specifications JSONB
+        NOT NULL
+        DEFAULT '[]'::jsonb,
+
+      manufacturer_info TEXT
+        NOT NULL
+        DEFAULT '',
+
+      warranty TEXT
+        NOT NULL
+        DEFAULT '',
+
+      images TEXT[]
+        NOT NULL
+        DEFAULT ARRAY[]::TEXT[],
+
+      description TEXT
+        NOT NULL
+        DEFAULT '',
+
+      active BOOLEAN
+        NOT NULL
+        DEFAULT TRUE,
+
+      best_selling BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      new_arrival BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      featured BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      created_at
+        TIMESTAMPTZ
+        NOT NULL
+        DEFAULT CURRENT_TIMESTAMP,
+
+      updated_at
+        TIMESTAMPTZ
+        NOT NULL
+        DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS slug VARCHAR(140)`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS gender VARCHAR(30) NOT NULL DEFAULT ''`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS subcategory VARCHAR(80) NOT NULL DEFAULT ''`);
+  await pool.query(`UPDATE store_products SET gender = 'Men' WHERE (gender IS NULL OR gender = '') AND LOWER(category) = 'men'`);
+  await pool.query(`UPDATE store_products SET gender = 'Women' WHERE (gender IS NULL OR gender = '') AND LOWER(category) = 'women'`);
+  await pool.query(`UPDATE store_products SET gender = 'Kids' WHERE (gender IS NULL OR gender = '') AND LOWER(category) = 'kids'`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS store_products_slug_unique ON store_products(slug) WHERE slug IS NOT NULL AND slug <> ''`);
+
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS sizes JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS colors JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS variants JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS specifications JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS manufacturer_info TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS warranty TEXT NOT NULL DEFAULT ''`);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS
+      store_products_category_index
+    ON store_products(category)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS
+      store_products_active_index
+    ON store_products(active)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS
+      store_products_active_created_index
+    ON store_products(active, created_at DESC)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS
+      store_products_active_category_index
+    ON store_products(active, category)
+  `);
+
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS best_selling BOOLEAN NOT NULL DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS new_arrival BOOLEAN NOT NULL DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE store_products ADD COLUMN IF NOT EXISTS featured BOOLEAN NOT NULL DEFAULT FALSE`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS admin_login_audit (
+      id BIGSERIAL PRIMARY KEY,
+      email VARCHAR(255),
+      ip_address VARCHAR(100),
+      user_agent TEXT,
+      success BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  /* SETTINGS */
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS store_settings (
+      key VARCHAR(100)
+        PRIMARY KEY,
+
+      value JSONB
+        NOT NULL,
+
+      updated_at
+        TIMESTAMPTZ
+        NOT NULL
+        DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  /* ORDER INDEXES */
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS
+      store_orders_email_index
+    ON store_orders(email)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS
+      store_orders_payment_index
+    ON store_orders(payment_status)
+  `);
+
+  /* =======================================================
+     INITIAL PRODUCTS
+     Only inserted when product table is empty.
+     ======================================================= */
+
+  const countResult =
+    await pool.query(`
+      SELECT COUNT(*)::int AS count
+      FROM store_products
+    `);
+
+  if (
+    countResult.rows[0].count ===
+    0
+  ) {
+    const seedProducts = [
+      {
+        id: "p1",
+        name:
+          "Premium Cotton Floral Kurti",
+        sku: "MSH-P001",
+        category: "Women",
+        price: 599,
+        mrp: 1299,
+        stock: 50,
+        images: [
+          "https://images.unsplash.com/photo-1604929846387-a365f57a3e7b?w=900&q=85",
+        ],
+        description:
+          "Comfortable breathable cotton kurti for everyday wear.",
+      },
+
+      {
+        id: "p2",
+        name:
+          "Men Classic Black Smartwatch",
+        sku: "MSH-P002",
+        category: "Electronics",
+        price: 1499,
+        mrp: 3999,
+        stock: 120,
+        images: [
+          "https://images.unsplash.com/photo-1546868871-7041f2a55e12?w=900&q=85",
+        ],
+        description:
+          "Modern smartwatch with activity tracking and notifications.",
+      },
+
+      {
+        id: "p3",
+        name:
+          "Women's Casual Handbag",
+        sku: "MSH-P003",
+        category: "Women",
+        price: 799,
+        mrp: 1999,
+        stock: 35,
+        images: [
+          "https://images.unsplash.com/photo-1584917865442-de89df76afd3?w=900&q=85",
+        ],
+        description:
+          "Spacious everyday handbag with a practical premium look.",
+      },
+
+      {
+        id: "p4",
+        name:
+          "Premium Wireless Headphones",
+        sku: "MSH-P004",
+        category: "Electronics",
+        price: 1299,
+        mrp: 2499,
+        stock: 80,
+        images: [
+          "https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=900&q=85",
+        ],
+        description:
+          "Wireless headphones with a comfortable over-ear design.",
+      },
+
+      {
+        id: "p5",
+        name:
+          "Classic Men's Casual Shirt",
+        sku: "MSH-P005",
+        category: "Men",
+        price: 699,
+        mrp: 1299,
+        stock: 60,
+        images: [
+          "https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=900&q=85",
+        ],
+        description:
+          "Classic casual shirt suitable for everyday wear.",
+      },
+
+      {
+        id: "p6",
+        name:
+          "Minimal Women's Sneakers",
+        sku: "MSH-P006",
+        category: "Footwear",
+        price: 999,
+        mrp: 1799,
+        stock: 42,
+        images: [
+          "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=900&q=85",
+        ],
+        description:
+          "Lightweight everyday sneakers with a minimal design.",
+      },
+    ];
+
+    for (
+      const product of seedProducts
+    ) {
+      const discount =
+        product.mrp > 0
+          ? Math.round(
+              ((product.mrp -
+                product.price) /
+                product.mrp) *
+                100
+            )
+          : 0;
+
+      await pool.query(
+        `
+        INSERT INTO store_products
+          (
+            id,
+            name,
+            sku,
+            category,
+            price,
+            mrp,
+            discount,
+            images,
+            description,
+            stock
+          )
+        VALUES
+          (
+            $1,$2,$3,$4,$5,
+            $6,$7,$8,$9,$10
+          )
+
+        ON CONFLICT DO NOTHING
+        `,
+        [
+          product.id,
+          product.name,
+          product.sku,
+          product.category,
+          product.price,
+          product.mrp,
+          discount,
+          product.images,
+          product.description,
+          product.stock,
+        ]
+      );
+    }
+  }
+
+  /* =======================================================
+     DEFAULT HOMEPAGE SETTINGS
+     ======================================================= */
+
+  const existingHomepage = await getSetting("homepage", null);
+  if (!existingHomepage) {
+    await setSetting("homepage", {
+      offer_enabled: true,
+      offer_title: "Welcome to MeeshooShopping",
+      offer_text: "Special offers are waiting for you.",
+      offer_button: "Shop Now",
+      offer_image: "",
+      desktop_banner: "",
+      mobile_banner: "",
+      best_selling_title: "🔥 Best Selling Products",
+      company_name: "MEESHO SHOPPING",
+      company_about: "Your trusted online shopping destination.",
+      contact_email: "meeshoshoppinginfo@gmail.com",
+      telegram_url: "https://t.me/MeeshooShopping",
+      reviews_catalog: [],
+    });
+  }
+
+  /* =======================================================
+     DEFAULT UPI SETTINGS
+     ======================================================= */
+
+  const existingPayment =
+    await getSetting(
+      "payment",
+      null
+    );
+
+  if (!existingPayment) {
+    await setSetting(
+      "payment",
+      {
+        method: "UPI",
+
+        enabled: true,
+
+        upi_id: String(
+          process.env.UPI_ID || ""
+        ).trim(),
+
+        upi_name: String(
+          process.env.UPI_NAME ||
+            "MEESHOO STORE"
+        ).trim(),
+
+        qr_image: String(
+          process.env.UPI_QR_URL ||
+            ""
+        ).trim(),
+
+        instructions:
+          "Pay using UPI and submit the UTR/transaction reference after payment.",
+      }
+    );
+  }
+
+  console.log(
+    "Database initialized successfully."
+  );
+}
+
+/* =========================================================
+   HEALTH
+   ========================================================= */
+
+app.get(
+  "/health",
+  async (req, res) => {
+    try {
+      await pool.query(
+        "SELECT 1"
+      );
+
+      return res.json({
+        ok: true,
+
+        service:
+          "meeshoo-backend",
+
+        database:
+          "connected",
+
+        payment_method:
+          "UPI",
+      });
+    } catch {
+      return res
+        .status(503)
+        .json({
+          ok: false,
+
+          service:
+            "meeshoo-backend",
+
+          database:
+            "disconnected",
+        });
+    }
+  }
+);
+
+app.get(
+  "/api/health",
+  async (req, res) => {
+    try {
+      await pool.query(
+        "SELECT 1"
+      );
+
+      return res.json({
+        ok: true,
+        database:
+          "connected",
+      });
+    } catch {
+      return res
+        .status(503)
+        .json({
+          ok: false,
+          database:
+            "disconnected",
+        });
+    }
+  }
+);
+
+async function auditAdminLogin(req, email, success) {
+  try {
+    await pool.query(
+      `INSERT INTO admin_login_audit (email, ip_address, user_agent, success) VALUES ($1,$2,$3,$4)`,
+      [email || null, req.ip || req.headers["x-forwarded-for"] || null, String(req.headers["user-agent"] || "").slice(0,1000), success]
+    );
+  } catch (error) {
+    console.error("Admin audit log error:", error.message);
+  }
+}
+
+/* =========================================================
+   ADMIN LOGIN
+   ========================================================= */
+
+app.post(
+  "/api/admin/login",
+  adminLoginLimiter,
+  async (req, res) => {
+    try {
+      const email =
+        normalizeEmail(
+          req.body.email
+        );
+
+      const password =
+        String(
+          req.body.password || ""
+        );
+
+      if (
+        email !==
+          ADMIN_EMAIL ||
+        !password
+      ) {
+        await auditAdminLogin(req, email, false);
+        return res
+          .status(401)
+          .json({
+            message:
+              "Invalid admin email or password.",
+          });
+      }
+
+      const valid =
+        await passwordMatches(
+          password
+        );
+
+      if (!valid) {
+        await auditAdminLogin(req, email, false);
+        return res
+          .status(401)
+          .json({
+            message:
+              "Invalid admin email or password.",
+          });
+      }
+
+      await auditAdminLogin(req, email, true);
+
+      const token =
+        jwt.sign(
+          adminTokenPayload(),
+          JWT_SECRET,
+          {
+            expiresIn:
+              "7d",
+          }
+        );
+
+      return res.json({
+        success: true,
+
+        token,
+
+        admin: {
+          email:
+            ADMIN_EMAIL,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Admin login error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to login as admin.",
+        });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/me",
+  requireAdmin,
+  (req, res) => {
+    return res.json({
+      success: true,
+
+      admin: {
+        email:
+          req.admin.email,
+      },
+    });
+  }
+);
+
+/* =========================================================
+   CUSTOMER EMAIL LOGIN
+   ========================================================= */
+
+app.post(
+  "/api/auth/email-login",
+  async (req, res) => {
+    try {
+      const email =
+        normalizeEmail(
+          req.body.email
+        );
+
+      if (
+        !validateEmail(email)
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Please enter a valid email address.",
+          });
+      }
+
+      const result =
+        await pool.query(
+          `
+          INSERT INTO store_users
+            (email)
+          VALUES
+            ($1)
+
+          ON CONFLICT (email)
+          DO UPDATE SET
+            email =
+              EXCLUDED.email
+
+          RETURNING
+            id,
+            email,
+            name,
+            phone,
+            created_at
+          `,
+          [email]
+        );
+
+      return res.json({
+        success: true,
+        user:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "Email login error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to continue with email.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   PUBLIC PRODUCTS
+   ========================================================= */
+
+app.get(
+  "/api/products",
+  async (req, res) => {
+    try {
+      const category = String(req.query.category || "").trim();
+      const search = String(req.query.search || "").trim();
+      const normalizedSearch = search.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim();
+      const searchSynonyms = {
+        airphone: ["airphone", "airphones", "earphone", "earphones", "earbud", "earbuds", "airpod", "airpods"],
+        airphones: ["airphone", "airphones", "earphone", "earphones", "earbud", "earbuds", "airpod", "airpods"],
+        airpod: ["airpod", "airpods", "earphone", "earphones", "earbud", "earbuds"],
+        airpods: ["airpod", "airpods", "earphone", "earphones", "earbud", "earbuds"],
+        mobile: ["mobile", "mobiles", "phone", "phones", "smartphone", "smartphones"],
+        mobiles: ["mobile", "mobiles", "phone", "phones", "smartphone", "smartphones"],
+        phone: ["phone", "phones", "mobile", "mobiles", "smartphone", "smartphones"],
+        phones: ["phone", "phones", "mobile", "mobiles", "smartphone", "smartphones"],
+        cellphone: ["cellphone", "mobile", "mobiles", "phone", "phones"],
+        footwear: ["footwear", "shoe", "shoes", "slipper", "slippers", "sandal", "sandals", "sneaker", "sneakers", "heel", "heels", "boot", "boots"],
+        footwears: ["footwear", "shoe", "shoes", "slipper", "slippers", "sandal", "sandals", "sneaker", "sneakers", "heel", "heels", "boot", "boots"],
+        shoe: ["shoe", "shoes"], shoes: ["shoe", "shoes"],
+        slipper: ["slipper", "slippers"], slippers: ["slipper", "slippers"],
+        watch: ["watch", "watches"], watches: ["watch", "watches"]
+      };
+      const searchTerms = normalizedSearch.split(" ").filter(Boolean);
+      const sort = String(req.query.sort || "popular").trim();
+      const requestedPage = Number(req.query.page || 1);
+      const requestedPageSize = Number(req.query.limit || 40);
+      const page = Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+      const pageSize = Number.isInteger(requestedPageSize)
+        ? Math.min(60, Math.max(12, requestedPageSize))
+        : 40;
+      const cacheKey = JSON.stringify({ category: category.toLowerCase(), search: search.toLowerCase(), sort, page, pageSize });
+      const now = Date.now();
+      const cached = publicProductsCache.get(cacheKey);
+      if (cached && now - cached.time < PRODUCT_CACHE_TTL_MS) {
+        res.set("Cache-Control", "public, max-age=10, stale-while-revalidate=30");
+        return res.json(cached.data);
+      }
+      const params = [];
+      const where = ["active = TRUE"];
+      if (category && category.toLowerCase() !== "all") {
+        params.push(category);
+        const cat = category.toLowerCase();
+        if (cat === "men" || cat === "women" || cat === "kids") {
+          // Gender pages include every product explicitly assigned to that audience,
+          // including shirts, jeans, watches, footwear, accessories, etc.
+          where.push(`(LOWER(COALESCE(gender,'')) = LOWER($${params.length}) OR LOWER(category) = LOWER($${params.length}))`);
+        } else if (cat === "footwear") {
+          // Footwear is a cross-gender collection: men + women + kids.
+          where.push(`(LOWER(category) IN ('footwear','shoes','shoe','slippers','slipper','sandals','sandal','sneakers','sneaker','heels','heel','boots','boot') OR LOWER(subcategory) IN ('footwear','shoes','shoe','slippers','slipper','sandals','sandal','sneakers','sneaker','heels','heel','boots','boot'))`);
+        } else if (cat === "mobiles" || cat === "mobile") {
+          where.push(`(LOWER(category) IN ('mobiles','mobile','mobile phones','smartphones','smartphone','phones','phone') OR LOWER(subcategory) IN ('mobile','mobiles','mobile phone','smartphone','smartphones','phone','phones'))`);
+        } else if (cat === "watches" || cat === "watch") {
+          where.push(`(LOWER(category) IN ('watches','watch') OR LOWER(subcategory) IN ('watch','watches'))`);
+        } else if (cat === "electronics") {
+          where.push(`(LOWER(category) IN ('electronics','electronic') OR LOWER(subcategory) IN ('electronics','electronic'))`);
+        } else if (cat === "home decor" || cat === "home" || cat === "homedecor") {
+          where.push(`(LOWER(category) IN ('home','home decor','homedecor','home decoration','home decoratives') OR LOWER(subcategory) IN ('home','home decor','homedecor','decor','decoration','decorative'))`);
+        } else {
+          where.push(`(LOWER(category) = LOWER($${params.length}))`);
+        }
+      }
+      if (searchTerms.length) {
+        for (const term of searchTerms) {
+          const alternatives = searchSynonyms[term] || [term];
+          const clauses = alternatives.map((alternative) => {
+            params.push(`%${alternative}%`);
+            const placeholder = `$${params.length}`;
+            return `(name ILIKE ${placeholder} OR category ILIKE ${placeholder} OR subcategory ILIKE ${placeholder} OR gender ILIKE ${placeholder} OR COALESCE(sku, '') ILIKE ${placeholder})`;
+          });
+          // Each typed word must match at least one synonym/field.
+          where.push(`(${clauses.join(" OR ")})`);
+        }
+      }
+      let orderBy = "created_at DESC";
+      if (sort === "price-low") orderBy = "price ASC, created_at DESC";
+      if (sort === "price-high") orderBy = "price DESC, created_at DESC";
+      if (sort === "rating") orderBy = "rating DESC, created_at DESC";
+      if (sort === "discount") orderBy = "discount DESC, created_at DESC";
+      if (sort === "new-arrival") orderBy = "created_at DESC";
+      if (sort === "best-selling") orderBy = "best_selling DESC, rating DESC, created_at DESC";
+      const offset = (page - 1) * pageSize;
+      params.push(pageSize, offset);
+      const dataParams = [...params];
+      const countParams = params.slice(0, -2);
+      const countKey = JSON.stringify({ category: category.toLowerCase(), search: normalizedSearch });
+      const cachedCount = publicProductCountCache.get(countKey);
+      const nowForCount = Date.now();
+
+      const [result, countResult] = await Promise.all([
+        pool.query(
+          `SELECT id, name, sku, slug, category, gender, subcategory, price, mrp, discount, rating, reviews, stock, sizes,
+                  CASE
+                    WHEN cardinality(images) > 0
+                    THEN ARRAY[images[1]]
+                    ELSE ARRAY[]::TEXT[]
+                  END AS images,
+                  '' AS description, active, best_selling, new_arrival, featured, created_at, updated_at
+           FROM store_products
+           WHERE ${where.join(" AND ")}
+           ORDER BY ${orderBy}
+           LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+          dataParams
+        ),
+        cachedCount && nowForCount - cachedCount.time < PRODUCT_CACHE_TTL_MS
+          ? Promise.resolve({ rows: [{ count: cachedCount.count }] })
+          : pool.query(
+              `SELECT COUNT(*)::int AS count FROM store_products WHERE ${where.join(" AND ")}`,
+              countParams
+            ),
+      ]);
+
+      const total = Number(countResult.rows[0]?.count || 0);
+      if (!cachedCount || nowForCount - cachedCount.time >= PRODUCT_CACHE_TTL_MS) {
+        publicProductCountCache.set(countKey, { time: nowForCount, count: total });
+        if (publicProductCountCache.size > 80) {
+          const oldestCountKey = publicProductCountCache.keys().next().value;
+          if (oldestCountKey) publicProductCountCache.delete(oldestCountKey);
+        }
+      }
+      const data = { products: result.rows.map(productFromRow), total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
+      publicProductsCache.set(cacheKey, { time: now, data });
+      if (publicProductsCache.size > 80) {
+        const oldestKey = publicProductsCache.keys().next().value;
+        if (oldestKey) publicProductsCache.delete(oldestKey);
+      }
+      res.set("Cache-Control", "public, max-age=10, stale-while-revalidate=30");
+      return res.json(data);
+    } catch (error) {
+      console.error("Products error:", error.message);
+      return res.status(500).json({ message: "Unable to load products." });
+    }
+  }
+);
+
+/* =========================================================
+   PUBLIC PRODUCT DETAIL
+   ========================================================= */
+
+app.get("/api/products/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ message: "Product id is required." });
+
+    const result = await pool.query(
+      `SELECT * FROM store_products WHERE active = TRUE AND (id = $1 OR LOWER(slug) = LOWER($1) OR LOWER(sku) = LOWER($1)) LIMIT 1`,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ message: "Product not found." });
+    }
+
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    return res.json({ product: productFromRow(result.rows[0]) });
+  } catch (error) {
+    console.error("Product detail error:", error.message);
+    return res.status(500).json({ message: "Unable to load product details." });
+  }
+});
+
+app.get("/api/products/:id/suggestions", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    const current = await pool.query(`SELECT id, category FROM store_products WHERE active = TRUE AND (id = $1 OR LOWER(slug) = LOWER($1) OR LOWER(sku) = LOWER($1))`, [id]);
+    if (!current.rows.length) return res.json({ products: [] });
+    const result = await pool.query(`SELECT * FROM store_products WHERE active = TRUE AND LOWER(category) = LOWER($1) AND id <> $2 ORDER BY best_selling DESC, rating DESC, updated_at DESC, created_at DESC LIMIT 12`, [current.rows[0].category, current.rows[0].id]);
+    return res.json({ products: result.rows.map(productFromRow) });
+  } catch (error) {
+    console.error("Suggestions error:", error.message);
+    return res.status(500).json({ message: "Unable to load suggestions." });
+  }
+});
+
+/* =========================================================
+   HOMEPAGE
+   ========================================================= */
+app.get("/api/homepage", async (req, res) => {
+  try {
+    const now = Date.now();
+    if (publicHomepageCache && now - publicHomepageCache.time < HOMEPAGE_CACHE_TTL_MS) {
+      res.set("Cache-Control", "public, max-age=20, stale-while-revalidate=60");
+      return res.json(publicHomepageCache.data);
+    }
+    const settings = await getSetting("homepage", {
+      offer_enabled: true, offer_title: "Welcome to MeeshooShopping",
+      offer_text: "Special offers are waiting for you.", offer_button: "Shop Now",
+      offer_image: "", desktop_banner: "", mobile_banner: "", best_selling_title: "🔥 Best Selling Products",
+      company_name: "MEESHO SHOPPING", company_about: "Your trusted online shopping destination.",
+      contact_email: "meeshoshoppinginfo@gmail.com", telegram_url: "https://t.me/MeeshooShopping",
+      reviews_catalog: [],
+    });
+    const columns = `id, name, sku, slug, category, price, mrp, discount, rating, reviews, stock,
+      CASE
+        WHEN cardinality(images) > 0
+        THEN ARRAY[images[1]]
+        ELSE ARRAY[]::TEXT[]
+      END AS images,
+      active, best_selling, new_arrival, featured, created_at, updated_at`;
+    const [best, featured, arrivals] = await Promise.all([
+      pool.query(`SELECT ${columns} FROM (SELECT DISTINCT ON (category) * FROM store_products WHERE active = TRUE ORDER BY category, best_selling DESC, updated_at DESC, created_at DESC) AS one_per_category ORDER BY best_selling DESC, updated_at DESC, created_at DESC LIMIT 30`),
+      pool.query(`SELECT ${columns} FROM store_products WHERE active = TRUE AND featured = TRUE ORDER BY updated_at DESC, created_at DESC LIMIT 12`),
+      pool.query(`SELECT ${columns} FROM store_products WHERE active = TRUE AND new_arrival = TRUE ORDER BY created_at DESC LIMIT 12`)
+    ]);
+    const data = { success: true, settings, best_selling: best.rows.map(productFromRow), featured: featured.rows.map(productFromRow), new_arrivals: arrivals.rows.map(productFromRow) };
+    publicHomepageCache = { time: now, data };
+    res.set("Cache-Control", "public, max-age=20, stale-while-revalidate=60");
+    return res.json(data);
+  } catch (error) {
+    console.error("Homepage error:", error.message);
+    return res.status(500).json({ message: "Unable to load homepage." });
+  }
+});
+/* =========================================================
+   CATEGORIES
+   ========================================================= */
+
+app.get(
+  "/api/categories",
+  async (req, res) => {
+    try {
+      const now = Date.now();
+      if (publicCategoriesCache && now - publicCategoriesCache.time < PRODUCT_CACHE_TTL_MS) {
+        res.set("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+        return res.json(publicCategoriesCache.data);
+      }
+
+      const result = await pool.query(`
+        SELECT DISTINCT category
+        FROM store_products
+        WHERE active = TRUE
+        ORDER BY category
+      `);
+
+      const data = { categories: ["All", ...result.rows.map((row) => row.category)] };
+      publicCategoriesCache = { time: now, data };
+      res.set("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+      return res.json(data);
+    } catch (error) {
+      console.error("Categories error:", error.message);
+      return res.status(500).json({ message: "Unable to load categories." });
+    }
+  }
+);
+
+/* =========================================================
+   PUBLIC UPI SETTINGS
+   ========================================================= */
+
+app.get(
+  "/api/payment-settings",
+  async (req, res) => {
+    try {
+      const payment =
+        await getSetting(
+          "payment",
+          {
+            method: "UPI",
+
+            enabled: false,
+
+            upi_id: "",
+
+            upi_name: "",
+
+            qr_image: "",
+
+            instructions: "",
+          }
+        );
+
+      return res.json({
+        success: true,
+
+        payment: {
+          method: "UPI",
+
+          enabled:
+            Boolean(
+              payment.enabled
+            ),
+
+          upi_id: String(
+            payment.upi_id ||
+              ""
+          ),
+
+          upi_name: String(
+            payment.upi_name ||
+              ""
+          ),
+
+          qr_image: String(
+            payment.qr_image ||
+              ""
+          ),
+
+          instructions:
+            String(
+              payment.instructions ||
+                ""
+            ),
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Payment settings error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to load payment settings.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   CREATE UPI ORDER
+   ========================================================= */
+
+app.post(
+  "/api/payments/create-order",
+  async (req, res) => {
+    const client =
+      await pool.connect();
+
+    try {
+      const customer =
+        req.body.customer ||
+        {};
+
+      const address =
+        req.body.address ||
+        {};
+
+      const incomingItems =
+        Array.isArray(
+          req.body.items
+        )
+          ? req.body.items
+          : [];
+
+      const email =
+        normalizeEmail(
+          customer.email
+        );
+
+      const name =
+        String(
+          customer.name || ""
+        ).trim();
+
+      const phone =
+        normalizePhone(
+          customer.phone
+        );
+
+      if (
+        !validateEmail(
+          email
+        )
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "A valid email address is required.",
+          });
+      }
+
+      if (!name) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Full name is required.",
+          });
+      }
+
+      if (
+        !validatePhone(
+          phone
+        )
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "A valid 10-digit mobile number is required.",
+          });
+      }
+
+      const addressError =
+        validateAddress(
+          address
+        );
+
+      if (addressError) {
+        return res
+          .status(400)
+          .json({
+            message:
+              addressError,
+          });
+      }
+
+      if (
+        !incomingItems.length
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Your cart is empty.",
+          });
+      }
+
+      const payment =
+        await getSetting(
+          "payment",
+          null
+        );
+
+      if (
+        !payment?.enabled ||
+        !payment?.upi_id
+      ) {
+        return res
+          .status(503)
+          .json({
+            message:
+              "UPI payment is not configured yet. Please contact the store.",
+          });
+      }
+
+      await client.query(
+        "BEGIN"
+      );
+
+      const verifiedItems =
+        [];
+
+      let calculatedAmount =
+        0;
+
+      /* ================================================
+         VERIFY PRODUCTS FROM DATABASE
+         ================================================ */
+
+      for (
+        const item of
+          incomingItems
+      ) {
+        const result =
+          await client.query(
+            `
+            SELECT *
+
+            FROM store_products
+
+            WHERE
+              id = $1
+              AND active = TRUE
+
+            FOR UPDATE
+            `,
+            [
+              String(
+                item.id
+              ),
+            ]
+          );
+
+        if (
+          !result.rows.length
+        ) {
+          throw new Error(
+            "One of the selected products is no longer available."
+          );
+        }
+
+        const product =
+          result.rows[0];
+
+        const quantity = Number(item.quantity);
+        const requestedSize = String(item.size || "").trim().toUpperCase();
+        const requestedColor = String(item.color || "").trim();
+        const requestedVariants = item.variants && typeof item.variants === "object" && !Array.isArray(item.variants) ? item.variants : {};
+        const productVariants = sanitizeVariants(product.variants);
+        for (const group of productVariants) {
+          const requested = String(requestedVariants[group.name] || "").trim();
+          if (!requested || !group.options.some((option) => option.label === requested)) {
+            throw new Error(`Please select a valid ${group.name} for ${product.name}.`);
+          }
+        }
+        const selectedVariants = Object.fromEntries(productVariants.map((group) => [group.name, String(requestedVariants[group.name] || "").trim()]));
+        const productColors = sanitizeColors(product.colors);
+        const selectedColor = productColors.find((entry) => entry.name === requestedColor) || null;
+
+        if (productColors.length && !selectedColor) {
+          throw new Error(`Please select a valid color for ${product.name}.`);
+        }
+
+        if (!Number.isInteger(quantity) || quantity < 1) {
+          throw new Error(`Invalid quantity for ${product.name}.`);
+        }
+
+        const productSizes = sanitizeSizes(product.sizes);
+        const selectedSize = productSizes.length
+          ? getSizeEntry(productSizes, requestedSize)
+          : null;
+
+        if (productSizes.length && !selectedSize) {
+          throw new Error(`Please select a valid size for ${product.name}.`);
+        }
+
+        const sizeStock = selectedSize ? Number(selectedSize.stock) : Number(product.stock);
+        const colorStock = selectedColor ? Number(selectedColor.stock) : Infinity;
+        const availableStock = Math.min(sizeStock, colorStock);
+
+        if (quantity > availableStock) {
+          throw new Error(
+            `${product.name}${selectedSize ? ` (${selectedSize.size})` : ""} has only ${availableStock} item(s) left in stock.`
+          );
+        }
+
+        const unitPrice = selectedColor?.price !== null && selectedColor?.price !== undefined
+          ? Number(selectedColor.price)
+          : selectedSize?.price === null || selectedSize?.price === undefined
+          ? Number(product.price)
+          : Number(selectedSize.price);
+
+        const lineTotal = money(unitPrice * quantity);
+
+        calculatedAmount +=
+          lineTotal;
+
+        verifiedItems.push(
+          {
+            id:
+              product.id,
+
+            name:
+              product.name,
+
+            sku:
+              product.sku,
+
+            color: selectedColor?.name || null,
+
+            size: selectedSize?.size || null,
+
+            variants: selectedVariants,
+
+            quantity,
+
+            price: unitPrice,
+
+            line_total:
+              lineTotal,
+
+            images:
+              Array.isArray(
+                product.images
+              )
+                ? [
+                    product
+                      .images[0],
+                  ].filter(
+                    Boolean
+                  )
+                : [],
+          }
+        );
+
+        /*
+          Reserve stock immediately.
+          If payment is cancelled/failed,
+          admin can release it.
+        */
+
+        await client.query(
+          `
+          UPDATE store_products
+
+          SET
+            stock =
+              CASE
+                WHEN $3::boolean THEN stock - $1
+                ELSE stock - $1
+              END,
+            sizes =
+              CASE
+                WHEN $3::boolean THEN
+                  (SELECT COALESCE(jsonb_agg(
+                    CASE
+                      WHEN UPPER(COALESCE(elem->>'size','')) = $4
+                      THEN jsonb_set(elem, '{stock}', to_jsonb(GREATEST(0, ((elem->>'stock')::int) - $1)))
+                      ELSE elem
+                    END
+                  ), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(sizes, '[]'::jsonb)) AS elem)
+                ELSE sizes
+              END,
+            colors =
+              CASE
+                WHEN $5::boolean THEN
+                  (SELECT COALESCE(jsonb_agg(
+                    CASE
+                      WHEN COALESCE(elem->>'name','') = $6
+                      THEN jsonb_set(elem, '{stock}', to_jsonb(GREATEST(0, ((elem->>'stock')::int) - $1)))
+                      ELSE elem
+                    END
+                  ), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(colors, '[]'::jsonb)) AS elem)
+                ELSE colors
+              END,
+            updated_at = CURRENT_TIMESTAMP
+
+          WHERE id = $2
+          `,
+          [
+            quantity,
+            product.id,
+            Boolean(selectedSize),
+            selectedSize?.size || "",
+            Boolean(selectedColor),
+            selectedColor?.name || "",
+          ]
+        );
+      }
+
+      calculatedAmount =
+        money(
+          calculatedAmount
+        );
+
+      if (
+        calculatedAmount <=
+        0
+      ) {
+        throw new Error(
+          "Invalid order amount."
+        );
+      }
+
+      const orderId =
+        generateId("MSH");
+
+      /* CUSTOMER */
+
+      await client.query(
+        `
+        INSERT INTO store_users
+          (
+            email,
+            name,
+            phone
+          )
+
+        VALUES
+          ($1,$2,$3)
+
+        ON CONFLICT (email)
+        DO UPDATE SET
+          name =
+            EXCLUDED.name,
+
+          phone =
+            EXCLUDED.phone
+        `,
+        [
+          email,
+          name,
+          phone,
+        ]
+      );
+
+      /* ORDER */
+
+      await client.query(
+        `
+        INSERT INTO store_orders
+          (
+            id,
+            email,
+            customer_name,
+            phone,
+            address,
+            items,
+            amount,
+            payment_status,
+            payment_method,
+            order_status
+          )
+
+        VALUES
+          (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            'PENDING_PAYMENT',
+            'UPI',
+            'NEW'
+          )
+        `,
+        [
+          orderId,
+
+          email,
+
+          name,
+
+          phone,
+
+          JSON.stringify(
+            sanitizeAddress(
+              address
+            )
+          ),
+
+          JSON.stringify(
+            verifiedItems
+          ),
+
+          calculatedAmount,
+        ]
+      );
+
+      await client.query(
+        "COMMIT"
+      );
+
+      return res
+        .status(201)
+        .json({
+          success: true,
+
+          order_id:
+            orderId,
+
+          amount:
+            calculatedAmount,
+
+          payment: {
+            method:
+              "UPI",
+
+            upi_id:
+              String(
+                payment.upi_id ||
+                  ""
+              ),
+
+            upi_name:
+              String(
+                payment.upi_name ||
+                  ""
+              ),
+
+            qr_image:
+              String(
+                payment.qr_image ||
+                  ""
+              ),
+
+            instructions:
+              String(
+                payment.instructions ||
+                  ""
+              ),
+          },
+
+          items:
+            verifiedItems,
+        });
+    } catch (error) {
+      await client.query(
+        "ROLLBACK"
+      );
+
+      console.error(
+        "Create UPI order error:",
+        error.message
+      );
+
+      return res
+        .status(400)
+        .json({
+          message:
+            error.message ||
+            "Unable to create order.",
+        });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+/* =========================================================
+   CUSTOMER SUBMITS UTR
+   ========================================================= */
+
+app.post(
+  "/api/payments/upi/submit",
+  async (req, res) => {
+    try {
+      const orderId =
+        String(
+          req.body.order_id ||
+            ""
+        ).trim();
+
+      const email =
+        normalizeEmail(
+          req.body.email
+        );
+
+      const utr =
+        String(
+          req.body
+            .transaction_reference ||
+            ""
+        ).trim();
+
+      const screenshot =
+        String(
+          req.body
+            .payment_screenshot_url ||
+            ""
+        ).trim();
+
+      if (
+        !orderId ||
+        !validateEmail(
+          email
+        ) ||
+        !utr
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Order ID, email and UTR/transaction reference are required.",
+          });
+      }
+
+      const result =
+        await pool.query(
+          `
+          UPDATE store_orders
+
+          SET
+            payment_status =
+              'SUBMITTED',
+
+            transaction_reference =
+              $1,
+
+            payment_screenshot_url =
+              $2,
+
+            updated_at =
+              CURRENT_TIMESTAMP
+
+          WHERE
+            id = $3
+
+            AND email = $4
+
+            AND payment_status =
+              'PENDING_PAYMENT'
+
+          RETURNING
+            id,
+            payment_status,
+            transaction_reference
+          `,
+          [
+            utr,
+
+            screenshot ||
+              null,
+
+            orderId,
+
+            email,
+          ]
+        );
+
+      if (
+        !result.rows.length
+      ) {
+        return res
+          .status(404)
+          .json({
+            message:
+              "Order not found or payment has already been submitted.",
+          });
+      }
+
+      return res.json({
+        success: true,
+
+        order:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "UPI submit error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to submit payment reference.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   CUSTOMER ORDER
+   ========================================================= */
+
+app.get(
+  "/api/orders/:orderId",
+  async (req, res) => {
+    try {
+      const orderId =
+        String(
+          req.params.orderId ||
+            ""
+        ).trim();
+
+      const email =
+        normalizeEmail(
+          req.query.email
+        );
+
+      const params = [
+        orderId,
+      ];
+
+      let extra = "";
+
+      if (email) {
+        params.push(email);
+
+        extra =
+          "AND email = $2";
+      }
+
+      const result =
+        await pool.query(
+          `
+          SELECT
+            id,
+            email,
+            customer_name,
+            phone,
+            address,
+            items,
+            amount,
+            payment_status,
+            payment_method,
+            transaction_reference,
+            payment_screenshot_url,
+            payment_id,
+            order_status,
+            admin_note,
+            created_at,
+            updated_at
+
+          FROM store_orders
+
+          WHERE
+            id = $1
+            ${extra}
+          `,
+          params
+        );
+
+      if (
+        !result.rows.length
+      ) {
+        return res
+          .status(404)
+          .json({
+            message:
+              "Order not found.",
+          });
+      }
+
+      return res.json({
+        success: true,
+
+        order:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "Get order error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to load order.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   CUSTOMER ORDERS
+   ========================================================= */
+
+app.get(
+  "/api/orders",
+  async (req, res) => {
+    try {
+      const email =
+        normalizeEmail(
+          req.query.email
+        );
+
+      if (
+        !validateEmail(
+          email
+        )
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Valid email is required.",
+          });
+      }
+
+      const result =
+        await pool.query(
+          `
+          SELECT
+            id,
+            customer_name,
+            phone,
+            address,
+            items,
+            amount,
+            payment_status,
+            payment_method,
+            transaction_reference,
+            payment_id,
+            order_status,
+            admin_note,
+            created_at,
+            updated_at
+
+          FROM store_orders
+
+          WHERE
+            email = $1
+
+          ORDER BY
+            created_at DESC
+          `,
+          [email]
+        );
+
+      return res.json({
+        success: true,
+
+        orders:
+          result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "Get orders error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to load orders.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN DASHBOARD
+   ========================================================= */
+
+app.get(
+  "/api/admin/dashboard",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const [
+        products,
+        customers,
+        orders,
+        pending,
+      ] =
+        await Promise.all([
+          pool.query(`
+            SELECT COUNT(*)::int AS count
+            FROM store_products
+            WHERE active = TRUE
+          `),
+
+          pool.query(`
+            SELECT COUNT(*)::int AS count
+            FROM store_users
+          `),
+
+          pool.query(`
+            SELECT COUNT(*)::int AS count
+            FROM store_orders
+          `),
+
+          pool.query(`
+            SELECT COUNT(*)::int AS count
+            FROM store_orders
+
+            WHERE
+              payment_status IN
+              (
+                'PENDING_PAYMENT',
+                'SUBMITTED'
+              )
+          `),
+        ]);
+
+      return res.json({
+        success: true,
+
+        stats: {
+          products:
+            products.rows[0]
+              .count,
+
+          customers:
+            customers.rows[0]
+              .count,
+
+          orders:
+            orders.rows[0]
+              .count,
+
+          pending_payments:
+            pending.rows[0]
+              .count,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Admin dashboard error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to load dashboard.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN PRODUCTS - LIST
+   ========================================================= */
+
+app.get(
+  "/api/admin/products",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `
+          SELECT *
+          FROM store_products
+          ORDER BY created_at DESC
+          `
+        );
+
+      return res.json({
+        success: true,
+
+        products:
+          result.rows.map(
+            productFromRow
+          ),
+      });
+    } catch (error) {
+      console.error(
+        "Admin products error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to load admin products.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN PRODUCTS - ADD
+   ========================================================= */
+
+app.post(
+  "/api/admin/products",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const body =
+        req.body || {};
+
+      const id = String(
+        body.id ||
+          generateId(
+            "PROD"
+          )
+      ).trim();
+
+      const name =
+        String(
+          body.name || ""
+        ).trim();
+
+      const sku =
+        String(
+          body.sku ||
+            `SKU-${Date.now()}`
+        ).trim();
+
+      // Custom slug wins. Otherwise prefer SKU so every product gets a stable unique URL.
+      // If SKU is unavailable, append the generated product id to the name.
+      const slug = slugify(body.slug) || slugify(sku) || `${slugify(name)}-${slugify(id)}`;
+
+      const category = String(body.category || "").trim();
+      const gender = String(body.gender || "").trim();
+      const subcategory = String(body.subcategory || "").trim();
+
+      const price =
+        money(body.price);
+
+      const mrp =
+        money(body.mrp);
+
+      const incomingSizes = sanitizeSizes(body.sizes);
+      const stock = incomingSizes.length
+        ? totalSizeStock(incomingSizes)
+        : positiveInt(body.stock);
+      const sizes = incomingSizes;
+      const colors = sanitizeColors(body.colors);
+      const variants = sanitizeVariants(body.variants);
+      const specifications = sanitizeSpecifications(body.specifications);
+      const manufacturerInfo = String(body.manufacturer_info || "").trim();
+      const warranty = String(body.warranty || "").trim();
+
+      const images =
+        sanitizeImages(
+          body.images
+        );
+
+      const description =
+        String(
+          body.description ||
+            ""
+        ).trim();
+
+      const rating =
+        Number(
+          body.rating ??
+            4.5
+        );
+
+      const reviews =
+        positiveInt(
+          body.reviews
+        );
+
+      const active =
+        body.active !==
+        false;
+
+      const bestSelling = Boolean(body.best_selling);
+      const newArrival = Boolean(body.new_arrival);
+      const featured = Boolean(body.featured);
+
+      if (
+        !name ||
+        !category ||
+        price <= 0 ||
+        mrp <= 0
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Name, category, price and MRP are required.",
+          });
+      }
+
+      if (
+        price > mrp
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Price cannot be greater than MRP.",
+          });
+      }
+
+      if (
+        !images.length
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "At least one product image is required.",
+          });
+      }
+
+      const discount =
+        mrp > 0
+          ? Math.max(
+              0,
+              Math.round(
+                ((mrp -
+                  price) /
+                  mrp) *
+                  100
+              )
+            )
+          : 0;
+
+      const result =
+        await pool.query(
+          `
+          INSERT INTO store_products
+            (
+              id,
+              name,
+              sku,
+              slug,
+              category,
+              gender,
+              subcategory,
+              price,
+              mrp,
+              discount,
+              rating,
+              reviews,
+              stock,
+              sizes,
+              colors,
+              variants,
+              specifications,
+              manufacturer_info,
+              warranty,
+              images,
+              description,
+              active,
+              best_selling,
+              new_arrival,
+              featured
+            )
+
+          VALUES
+            (
+              $1,$2,$3,$4,$5,$6,$7,$8,
+              $9,$10,$11,$12,$13,
+              $14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
+            )
+
+          RETURNING *
+          `,
+          [
+            id,
+
+            name,
+
+            sku,
+
+            slug,
+
+            category,
+
+            gender,
+
+            subcategory,
+
+            price,
+
+            mrp,
+
+            discount,
+
+            Math.min(
+              5,
+              Math.max(
+                0,
+                rating
+              )
+            ),
+
+            reviews,
+
+            stock,
+
+            JSON.stringify(sizes),
+            JSON.stringify(colors),
+            JSON.stringify(variants),
+            JSON.stringify(specifications),
+            manufacturerInfo,
+            warranty,
+
+            images,
+
+            description,
+
+            active,
+            bestSelling,
+            newArrival,
+            featured,
+          ]
+        );
+
+      clearPublicCatalogCache();
+
+      return res
+        .status(201)
+        .json({
+          success: true,
+
+          product:
+            productFromRow(
+              result.rows[0]
+            ),
+        });
+    } catch (error) {
+      console.error(
+        "Create product error:",
+        error.message
+      );
+
+      return res
+        .status(400)
+        .json({
+          message:
+            error.code ===
+            "23505"
+              ? "Product ID, SKU or Product URL already exists."
+              : "Unable to create product.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN PRODUCTS - UPDATE
+   ========================================================= */
+
+app.put(
+  "/api/admin/products/:id",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const id =
+        String(
+          req.params.id ||
+            ""
+        ).trim();
+
+      const body =
+        req.body || {};
+
+      // Keep the existing URL unless Admin explicitly changes it. This prevents old
+      // Instagram/ad URLs from changing just because the product name was edited.
+      const requestedSlug = Object.prototype.hasOwnProperty.call(body, "slug")
+        ? slugify(body.slug)
+        : "";
+
+      const currentResult =
+        await pool.query(
+          `
+          SELECT *
+          FROM store_products
+          WHERE id = $1
+          `,
+          [id]
+        );
+
+      if (
+        !currentResult.rows
+          .length
+      ) {
+        return res
+          .status(404)
+          .json({
+            message:
+              "Product not found.",
+          });
+      }
+
+      const current =
+        currentResult
+          .rows[0];
+
+      const name =
+        String(
+          body.name ??
+            current.name
+        ).trim();
+
+      const sku =
+        String(
+          body.sku ??
+            current.sku ??
+            ""
+        ).trim() ||
+        null;
+
+      const category =
+        String(
+          body.category ??
+            current.category
+        ).trim();
+
+      const price =
+        money(
+          body.price ??
+            current.price
+        );
+
+      const mrp =
+        money(
+          body.mrp ??
+            current.mrp
+        );
+
+      const incomingSizes = body.sizes === undefined
+        ? (Array.isArray(current.sizes) ? current.sizes : [])
+        : sanitizeSizes(body.sizes);
+      const sizes = sanitizeSizes(incomingSizes);
+      const stock = sizes.length
+        ? totalSizeStock(sizes)
+        : positiveInt(body.stock ?? current.stock);
+      const colors = body.colors === undefined ? sanitizeColors(current.colors) : sanitizeColors(body.colors);
+      const variants = body.variants === undefined ? sanitizeVariants(current.variants) : sanitizeVariants(body.variants);
+      const specifications = body.specifications === undefined ? sanitizeSpecifications(current.specifications) : sanitizeSpecifications(body.specifications);
+      const manufacturerInfo = String(body.manufacturer_info ?? current.manufacturer_info ?? "").trim();
+      const warranty = String(body.warranty ?? current.warranty ?? "").trim();
+
+      const images =
+        body.images ===
+        undefined
+          ? current.images
+          : sanitizeImages(
+              body.images
+            );
+
+      const description =
+        String(
+          body.description ??
+            current.description ??
+            ""
+        ).trim();
+
+      const rating =
+        Number(
+          body.rating ??
+            current.rating
+        );
+
+      const reviews =
+        positiveInt(
+          body.reviews ??
+            current.reviews
+        );
+
+      const active =
+        body.active ===
+        undefined
+          ? current.active
+          : Boolean(
+              body.active
+            );
+
+      const bestSelling = body.best_selling === undefined ? Boolean(current.best_selling) : Boolean(body.best_selling);
+      const newArrival = body.new_arrival === undefined ? Boolean(current.new_arrival) : Boolean(body.new_arrival);
+      const featured = body.featured === undefined ? Boolean(current.featured) : Boolean(body.featured);
+      const updateSlug = requestedSlug || current.slug || slugify(sku) || `${slugify(name)}-${slugify(id)}`;
+
+      if (
+        !name ||
+        !category ||
+        price <= 0 ||
+        mrp <= 0
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Name, category, price and MRP are required.",
+          });
+      }
+
+      if (
+        price > mrp
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Price cannot be greater than MRP.",
+          });
+      }
+
+      if (
+        !images.length
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "At least one product image is required.",
+          });
+      }
+
+      const discount =
+        mrp > 0
+          ? Math.max(
+              0,
+              Math.round(
+                ((mrp -
+                  price) /
+                  mrp) *
+                  100
+              )
+            )
+          : 0;
+
+      const result =
+        await pool.query(
+          `
+          UPDATE store_products
+
+          SET
+            name = $1,
+            sku = $2,
+            slug = $3,
+            category = $4,
+            gender = $5,
+            subcategory = $6,
+            price = $7,
+            mrp = $8,
+            discount = $9,
+            rating = $10,
+            reviews = $11,
+            stock = $12,
+            sizes = $13,
+            colors = $14,
+            variants = $15,
+            specifications = $16,
+            manufacturer_info = $17,
+            warranty = $18,
+            images = $19,
+            description = $20,
+            active = $21,
+            best_selling = $22,
+            new_arrival = $23,
+            featured = $24,
+            updated_at = CURRENT_TIMESTAMP
+
+          WHERE
+            id = $25
+
+          RETURNING *
+          `,
+          [
+            name,
+            sku,
+            updateSlug,
+            category,
+            gender,
+            subcategory,
+            price,
+            mrp,
+            discount,
+            Math.min(5, Math.max(0, rating)),
+            reviews,
+            stock,
+            JSON.stringify(sizes),
+            JSON.stringify(colors),
+            JSON.stringify(variants),
+            JSON.stringify(specifications),
+            manufacturerInfo,
+            warranty,
+            images,
+            description,
+            active,
+            bestSelling,
+            newArrival,
+            featured,
+            id,
+          ]
+        );
+
+      clearPublicCatalogCache();
+
+      return res.json({
+        success: true,
+
+        product:
+          productFromRow(
+            result.rows[0]
+          ),
+      });
+    } catch (error) {
+      console.error(
+        "Update product error:",
+        error.message
+      );
+
+      return res
+        .status(400)
+        .json({
+          message:
+            error.code ===
+            "23505"
+              ? "SKU or Product URL already exists."
+              : "Unable to update product.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN PRODUCTS - DELETE
+   Hard delete: removed from admin and public catalog.
+   Existing orders keep their saved item snapshot.
+   ========================================================= */
+
+app.delete(
+  "/api/admin/products/:id",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id || "").trim();
+
+      const result = await pool.query(
+        `DELETE FROM store_products WHERE id = $1 RETURNING id`,
+        [id]
+      );
+
+      if (!result.rows.length) {
+        return res.status(404).json({ message: "Product not found." });
+      }
+
+      clearPublicCatalogCache();
+      return res.json({ success: true, message: "Product deleted permanently." });
+    } catch (error) {
+      console.error("Delete product error:", error.message);
+      return res.status(500).json({ message: "Unable to delete product." });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN CUSTOMERS
+   ========================================================= */
+
+app.get(
+  "/api/admin/customers",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `
+          SELECT
+
+            u.id,
+            u.email,
+            u.name,
+            u.phone,
+            u.created_at,
+
+            COUNT(o.id)::int
+              AS order_count,
+
+            COALESCE(
+              SUM(o.amount),
+              0
+            )::numeric(12,2)
+              AS total_spent
+
+          FROM store_users u
+
+          LEFT JOIN store_orders o
+            ON LOWER(
+              o.email
+            ) =
+            LOWER(
+              u.email
+            )
+
+          GROUP BY
+            u.id
+
+          ORDER BY
+            u.created_at DESC
+          `
+        );
+
+      return res.json({
+        success: true,
+
+        customers:
+          result.rows.map(
+            (row) => ({
+              ...row,
+
+              order_count:
+                Number(
+                  row.order_count
+                ),
+
+              total_spent:
+                Number(
+                  row.total_spent
+                ),
+            })
+          ),
+      });
+    } catch (error) {
+      console.error(
+        "Admin customers error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to load customers.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN ORDERS
+   ========================================================= */
+
+app.get(
+  "/api/admin/orders",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `
+          SELECT *
+          FROM store_orders
+          ORDER BY
+            created_at DESC
+          `
+        );
+
+      return res.json({
+        success: true,
+
+        orders:
+          result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "Admin orders error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to load orders.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN HOMEPAGE SETTINGS / LOGIN AUDIT
+   ========================================================= */
+app.get("/api/admin/homepage", requireAdmin, async (req,res)=>{
+  try { const homepage = await getSetting("homepage", {offer_enabled:true,offer_title:"Welcome to MeeshooShopping",offer_text:"Special offers are waiting for you.",offer_button:"Shop Now",offer_image:"",show_banner:true,show_categories:true,show_deals:true,show_best_selling:true,show_trust_strip:true,best_selling_title:"🔥 Best Selling Products",company_name:"MEESHO SHOPPING",company_about:"Your trusted online shopping destination.",contact_email:"meeshoshoppinginfo@gmail.com",telegram_url:"https://t.me/MeeshooShopping",reviews_catalog:[]}); return res.json({success:true,homepage}); }
+  catch(error){ return res.status(500).json({message:"Unable to load homepage settings."}); }
+});
+app.put("/api/admin/homepage", requireAdmin, async (req,res)=>{
+  try { const current = await getSetting("homepage",{}); const homepage={...current,...(req.body||{})}; await setSetting("homepage",homepage); return res.json({success:true,homepage}); }
+  catch(error){ return res.status(500).json({message:"Unable to save homepage settings."}); }
+});
+app.get("/api/admin/security-log", requireAdmin, async (req,res)=>{
+  try { const result=await pool.query(`SELECT id,email,ip_address,user_agent,success,created_at FROM admin_login_audit ORDER BY created_at DESC LIMIT 100`); return res.json({success:true,logs:result.rows}); }
+  catch(error){ return res.status(500).json({message:"Unable to load security log."}); }
+});
+
+/* =========================================================
+   ADMIN PAYMENT SETTINGS
+   ========================================================= */
+
+app.get(
+  "/api/admin/payment-settings",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const payment =
+        await getSetting(
+          "payment",
+          null
+        );
+
+      return res.json({
+        success: true,
+        payment,
+      });
+    } catch (error) {
+      console.error(
+        "Admin payment settings error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to load payment settings.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN CHANGE UPI
+   ========================================================= */
+
+app.put(
+  "/api/admin/payment-settings",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const current =
+        (await getSetting(
+          "payment",
+          {}
+        )) || {};
+
+      const next = {
+        method: "UPI",
+
+        enabled:
+          req.body.enabled ===
+          undefined
+            ? Boolean(
+                current.enabled
+              )
+            : Boolean(
+                req.body.enabled
+              ),
+
+        upi_id:
+          String(
+            req.body.upi_id ??
+              current.upi_id ??
+              ""
+          ).trim(),
+
+        upi_name:
+          String(
+            req.body.upi_name ??
+              current.upi_name ??
+              ""
+          ).trim(),
+
+        qr_image:
+          String(
+            req.body.qr_image ??
+              current.qr_image ??
+              ""
+          ).trim(),
+
+        instructions:
+          String(
+            req.body.instructions ??
+              current.instructions ??
+              ""
+          ).trim(),
+      };
+
+      if (
+        next.enabled &&
+        !next.upi_id
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "UPI ID is required when UPI is enabled.",
+          });
+      }
+
+      await setSetting(
+        "payment",
+        next
+      );
+
+      return res.json({
+        success: true,
+        payment: next,
+      });
+    } catch (error) {
+      console.error(
+        "Update payment settings error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to update UPI settings.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN VERIFY PAYMENT
+   ========================================================= */
+
+app.put(
+  "/api/admin/orders/:id/payment",
+  requireAdmin,
+  async (req, res) => {
+    const client =
+      await pool.connect();
+
+    try {
+      const id =
+        String(
+          req.params.id ||
+            ""
+        ).trim();
+
+      const status =
+        String(
+          req.body.status ||
+            ""
+        )
+          .trim()
+          .toUpperCase();
+
+      const paymentId =
+        String(
+          req.body.payment_id ||
+            ""
+        ).trim();
+
+      const note =
+        String(
+          req.body.admin_note ||
+            ""
+        ).trim();
+
+      if (
+        ![
+          "PAID",
+          "FAILED",
+          "CANCELLED",
+        ].includes(status)
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Payment status must be PAID, FAILED or CANCELLED.",
+          });
+      }
+
+      await client.query(
+        "BEGIN"
+      );
+
+      const orderResult =
+        await client.query(
+          `
+          SELECT *
+          FROM store_orders
+
+          WHERE
+            id = $1
+
+          FOR UPDATE
+          `,
+          [id]
+        );
+
+      if (
+        !orderResult.rows
+          .length
+      ) {
+        throw new Error(
+          "Order not found."
+        );
+      }
+
+      const order =
+        orderResult.rows[0];
+
+      /*
+        Don't turn an already paid order
+        into failed/cancelled.
+      */
+
+      if (
+        order.payment_status ===
+          "PAID" &&
+        status !== "PAID"
+      ) {
+        throw new Error(
+          "A paid order cannot be marked failed or cancelled."
+        );
+      }
+
+      if (
+        status === "PAID"
+      ) {
+        await client.query(
+          `
+          UPDATE store_orders
+
+          SET
+            payment_status =
+              'PAID',
+
+            payment_id =
+              COALESCE(
+                NULLIF(
+                  $1,
+                  ''
+                ),
+                payment_id
+              ),
+
+            order_status =
+              CASE
+
+                WHEN order_status =
+                  'NEW'
+
+                THEN
+                  'CONFIRMED'
+
+                ELSE
+                  order_status
+
+              END,
+
+            admin_note =
+              COALESCE(
+                NULLIF(
+                  $2,
+                  ''
+                ),
+                admin_note
+              ),
+
+            updated_at =
+              CURRENT_TIMESTAMP
+
+          WHERE
+            id = $3
+          `,
+          [
+            paymentId,
+            note,
+            id,
+          ]
+        );
+      } else {
+        /*
+          Return reserved stock exactly once.
+        */
+
+        if (
+          !order.stock_released
+        ) {
+          const items =
+            Array.isArray(
+              order.items
+            )
+              ? order.items
+              : [];
+
+          for (
+            const item of
+              items
+          ) {
+            const quantity =
+              Number(
+                item.quantity ||
+                  0
+              );
+
+            if (
+              quantity > 0
+            ) {
+              const size = String(item.size || "").trim().toUpperCase();
+              await client.query(
+                `
+                UPDATE store_products
+                SET
+                  stock = stock + $1,
+                  sizes = CASE
+                    WHEN $3 <> '' THEN
+                      (SELECT COALESCE(jsonb_agg(
+                        CASE
+                          WHEN UPPER(COALESCE(elem->>'size','')) = $3
+                          THEN jsonb_set(elem, '{stock}', to_jsonb(((elem->>'stock')::int) + $1))
+                          ELSE elem
+                        END
+                      ), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(sizes, '[]'::jsonb)) AS elem)
+                    ELSE sizes
+                  END,
+                  updated_at = CURRENT_TIMESTAMP
+                WHERE id = $2
+                `,
+                [quantity, String(item.id), size]
+              );
+            }
+          }
+        }
+
+        await client.query(
+          `
+          UPDATE store_orders
+
+          SET
+            payment_status =
+              $1,
+
+            order_status =
+              'CANCELLED',
+
+            admin_note =
+              COALESCE(
+                NULLIF(
+                  $2,
+                  ''
+                ),
+                admin_note
+              ),
+
+            stock_released =
+              TRUE,
+
+            updated_at =
+              CURRENT_TIMESTAMP
+
+          WHERE
+            id = $3
+          `,
+          [
+            status,
+            note,
+            id,
+          ]
+        );
+      }
+
+      await client.query(
+        "COMMIT"
+      );
+
+      return res.json({
+        success: true,
+
+        payment_status:
+          status,
+      });
+    } catch (error) {
+      await client.query(
+        "ROLLBACK"
+      );
+
+      console.error(
+        "Admin payment update error:",
+        error.message
+      );
+
+      return res
+        .status(400)
+        .json({
+          message:
+            error.message ||
+            "Unable to update payment.",
+        });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN ORDER STATUS
+   ========================================================= */
+
+app.put(
+  "/api/admin/orders/:id/status",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const id =
+        String(
+          req.params.id ||
+            ""
+        ).trim();
+
+      const status =
+        String(
+          req.body
+            .order_status ||
+            ""
+        )
+          .trim()
+          .toUpperCase();
+
+      const note =
+        String(
+          req.body.admin_note ||
+            ""
+        ).trim();
+
+      const allowed = [
+        "NEW",
+        "CONFIRMED",
+        "PACKED",
+        "SHIPPED",
+        "DELIVERED",
+        "CANCELLED",
+      ];
+
+      if (
+        !allowed.includes(
+          status
+        )
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              `Invalid order status. Allowed: ${allowed.join(
+                ", "
+              )}`,
+          });
+      }
+
+      const result =
+        await pool.query(
+          `
+          UPDATE store_orders
+
+          SET
+            order_status =
+              $1,
+
+            admin_note =
+              COALESCE(
+                NULLIF(
+                  $2,
+                  ''
+                ),
+                admin_note
+              ),
+
+            updated_at =
+              CURRENT_TIMESTAMP
+
+          WHERE
+            id = $3
+
+          RETURNING
+            id,
+            order_status,
+            admin_note
+          `,
+          [
+            status,
+            note,
+            id,
+          ]
+        );
+
+      if (
+        !result.rows.length
+      ) {
+        return res
+          .status(404)
+          .json({
+            message:
+              "Order not found.",
+          });
+      }
+
+      return res.json({
+        success: true,
+
+        order:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "Admin order status error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          message:
+            "Unable to update order status.",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   404
+   ========================================================= */
+
+app.use(
+  (req, res) => {
+    res
+      .status(404)
+      .json({
+        message:
+          "API route not found.",
+      });
+  }
+);
+
+/* =========================================================
+   ERROR HANDLER
+   ========================================================= */
+
+app.use(
+  (
+    error,
+    req,
+    res,
+    next
+  ) => {
+    console.error(
+      "Unhandled server error:",
+      error.message
+    );
+
+    if (
+      res.headersSent
+    ) {
+      return next(error);
+    }
+
+    return res
+      .status(500)
+      .json({
+        message:
+          "Internal server error.",
+      });
+  }
+);
+
+/* =========================================================
+   START SERVER
+   ========================================================= */
+
+async function startServer() {
+  try {
+    await initializeDatabase();
+
+    app.listen(
+      PORT,
+      () => {
+        console.log(
+          `MEESHOO server running on port ${PORT}`
+        );
+
+        console.log(
+          "Payment method: UPI"
+        );
+
+        console.log(
+          `Admin account: ${ADMIN_EMAIL}`
+        );
+      }
+    );
+  } catch (error) {
+    console.error(
+      "Server startup failed:",
+      error.message
+    );
+
+    process.exit(1);
+  }
+}
+
+startServer();
