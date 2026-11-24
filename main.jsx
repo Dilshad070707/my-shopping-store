@@ -45,7 +45,7 @@ const DEFAULT_CATEGORIES = [
 ];
 
 function formatPrice(value) {
-  return `â‚¹${Number(value || 0).toLocaleString(
+  return `₹${Number(value || 0).toLocaleString(
     "en-IN"
   )}`;
 }
@@ -1172,8 +1172,8 @@ function StoreApp() {
       <style>{STORE_CSS}</style>
 
       <div className="topbar">
-        ðŸ“£ <strong>{homepage.settings.offer_title || "BIG FESTIVAL SALE"}</strong>
-        <span> â€¢ ðŸ‡®ðŸ‡³ Made for India â€¢ UPI Payments â€¢ Easy Checkout</span>
+        📣 <strong>{homepage.settings.offer_title || "BIG FESTIVAL SALE"}</strong>
+        <span> • 🇮🇳 Made for India • UPI Payments • Easy Checkout</span>
         <button
           className="topbar-button"
           onClick={() => document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"})}
@@ -1195,7 +1195,7 @@ function StoreApp() {
           >
             <span className="logo-mark">M</span>
             <span>MEESHOO <small>SHOPPING</small></span>
-            <span className="india-mark">ðŸ‡®ðŸ‡³</span>
+            <span className="india-mark">🇮🇳</span>
           </button>
 
           <div className="search">
@@ -1205,27 +1205,27 @@ function StoreApp() {
               onChange={(event) => { setSearch(event.target.value); setPage(1); }}
               placeholder="Search for products, categories or brands..."
             />
-            <span className="search-icon">âŒ•</span>
+            <span className="search-icon">⌕</span>
           </div>
 
           <div className="header-actions">
             <button className="header-button" onClick={() => setLoginOpen(true)}>
-              <span>â™™</span>
+              <span>♙</span>
               <small>My Account</small>
             </button>
             <button className="header-button wishlist-head" onClick={() => setNotice("Wishlist is ready.")}>
-              <span>â™¡</span>
+              <span>♡</span>
               <small>Wishlist</small>
             </button>
             <button className="header-button cart-head" onClick={() => setCartOpen(true)}>
-              <span>ðŸ›’</span>
+              <span>🛒</span>
               <small>Cart <b>({cartCount})</b></small>
             </button>
           </div>
         </div>
 
         <nav className="main-nav">
-          <button className="all-categories" onClick={() => document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"})}>â˜° All CategoriesâŒ„</button>
+          <button className="all-categories" onClick={() => document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"})}>☰ All Categories⌄</button>
           <button className="nav-link active" onClick={() => window.scrollTo({top:0,behavior:"smooth"})}>Home</button>
           <button className="nav-link" onClick={() => document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"})}>Categories</button>
           <button className="nav-link" onClick={() => { setCategory("All"); setSearch(""); setSort("new-arrival"); setPage(1); document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"}); }}>New Arrivals</button>
@@ -1246,7 +1246,7 @@ function StoreApp() {
               className="hero-button"
               onClick={() => document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"})}
             >
-              {homepage.settings.offer_button || "Shop Now"} <span>â†’</span>
+              {homepage.settings.offer_button || "Shop Now"} <span>→</span>
             </button>
           </div>
 
@@ -1258,10 +1258,10 @@ function StoreApp() {
               </picture>
             ) : (
               <>
-                <div className="hero-spark">âœ¦</div>
-                <div className="hero-diya">ðŸª”</div>
+                <div className="hero-spark">✦</div>
+                <div className="hero-diya">🪔</div>
                 <div className="hero-discount"><small>UP TO</small><strong>{bannerDiscount}%</strong><b>OFF</b></div>
-                <div className="hero-gift">ðŸŽ</div>
+                <div className="hero-gift">🎁</div>
               </>
             )}
           </div>
@@ -1269,17 +1269,17 @@ function StoreApp() {
       </section>}
 
       {!filteredBrowse && homepage.settings.show_trust_strip !== false && <section className="trust-strip">
-        <div><span>ðŸ›¡ï¸</span><strong>100% Original Products</strong><small>Quality You Can Trust</small></div>
-        <div><span>ðŸ‘¥</span><strong>10 Million+ Trusted Customers</strong><small>Shopping with confidence</small></div>
-        <div><span>â†©ï¸</span><strong>Easy Returns</strong><small>7 Days Return Policy</small></div>
-        <div><span>ðŸšš</span><strong>Fast Delivery</strong><small>Across India</small></div>
-        <div><span>ðŸ”</span><strong>Secure Payments</strong><small>UPI, Card, Netbanking</small></div>
+        <div><span>🛡️</span><strong>100% Original Products</strong><small>Quality You Can Trust</small></div>
+        <div><span>👥</span><strong>10 Million+ Trusted Customers</strong><small>Shopping with confidence</small></div>
+        <div><span>↩️</span><strong>Easy Returns</strong><small>7 Days Return Policy</small></div>
+        <div><span>🚚</span><strong>Fast Delivery</strong><small>Across India</small></div>
+        <div><span>🔐</span><strong>Secure Payments</strong><small>UPI, Card, Netbanking</small></div>
       </section>}
 
       {offerOpen && (
         <div className="offer-overlay" onClick={() => setOfferOpen(false)}>
           <div className="offer-popup" onClick={(e) => e.stopPropagation()}>
-            <button className="offer-close" onClick={() => setOfferOpen(false)}>Ã—</button>
+            <button className="offer-close" onClick={() => setOfferOpen(false)}>×</button>
             {homepage.settings.offer_image && <img src={homepage.settings.offer_image} alt="Offer" />}
             <div className="offer-body">
               <div className="offer-badge">SPECIAL OFFER</div>
@@ -1296,12 +1296,12 @@ function StoreApp() {
       {!filteredBrowse && homepage.settings.show_categories !== false && <section className="home-section shop-categories-section" id="shop-categories">
         <div className="section-title">
           <h2>Shop By Categories</h2>
-          <button className="text-link" onClick={() => document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"})}>View All â†’</button>
+          <button className="text-link" onClick={() => document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"})}>View All →</button>
         </div>
         <div className="category-showcase-grid">
           {categories.filter((item) => item !== "All").map((item) => (
             <button key={`show-${item}`} className="category-tile" onClick={() => { setCategory(item); document.getElementById("catalog")?.scrollIntoView({behavior:"smooth"}); }}>
-              <span>{({All:"ðŸ›ï¸",Women:"ðŸ‘—",Men:"ðŸ‘”",Electronics:"ðŸŽ§",Beauty:"ðŸ’„",Footwear:"ðŸ‘Ÿ",Home:"ðŸ›‹ï¸",Kitchen:"ðŸ³",Grocery:"ðŸ›’",Accessories:"ðŸ‘œ",Kids:"ðŸ§¸",Sports:"âš½",Bags:"ðŸ‘œ",Jewellery:"ðŸ’Ž",Watches:"âŒš"})[item] || "ðŸ›ï¸"}</span>
+              <span>{({All:"🛍️",Women:"👗",Men:"👔",Electronics:"🎧",Beauty:"💄",Footwear:"👟",Home:"🛋️",Kitchen:"🍳",Grocery:"🛒",Accessories:"👜",Kids:"🧸",Sports:"⚽",Bags:"👜",Jewellery:"💎",Watches:"⌚"})[item] || "🛍️"}</span>
               <b>{item}</b>
             </button>
           ))}
@@ -1310,8 +1310,8 @@ function StoreApp() {
 
       {!filteredBrowse && homepage.settings.show_deals !== false && <section className="deals-section">
         <div className="section-title">
-          <h2>âš¡ Deals of the Day</h2>
-          <span className="deal-timer">Limited stock â€¢ Today only</span>
+          <h2>⚡ Deals of the Day</h2>
+          <span className="deal-timer">Limited stock • Today only</span>
         </div>
         <div className="deals-grid">
           {products.slice(0, 5).map((product) => (
@@ -1322,7 +1322,7 @@ function StoreApp() {
               </div>
               <div className="deal-body">
                 <strong>{product.name}</strong>
-                <span>â˜… {product.rating || 4.5}</span>
+                <span>★ {product.rating || 4.5}</span>
                 <div><b>{formatPrice(product.price)}</b> <del>{formatPrice(product.mrp || product.price)}</del></div>
               </div>
             </article>
@@ -1332,7 +1332,7 @@ function StoreApp() {
 
       {!filteredBrowse && homepage.settings.show_best_selling !== false && <section className="home-section slider-section" id="best-selling">
         <div className="section-title">
-          <h2>{homepage.settings.best_selling_title || "ðŸ”¥ Best Selling Products"}</h2>
+          <h2>{homepage.settings.best_selling_title || "🔥 Best Selling Products"}</h2>
           <span className="result-count">Swipe to explore</span>
         </div>
         <div className="product-slider" ref={bestSellingSliderRef}>
@@ -1341,7 +1341,7 @@ function StoreApp() {
               <img src={product.images?.[0] || "https://images.unsplash.com/photo-1472851294608-062f824d29cc?w=900&q=85"} alt={product.name} />
               <div className="mini-card-body">
                 <strong>{product.name}</strong>
-                <span>â˜… {product.rating || 4.5}</span>
+                <span>★ {product.rating || 4.5}</span>
                 <b>{formatPrice(product.price)}</b>
               </div>
             </article>
@@ -1381,7 +1381,7 @@ function StoreApp() {
                   setPage(1);
                 }}
               >
-                <span className="category-icon">{({All:"ðŸ›ï¸",Women:"ðŸ‘—",Men:"ðŸ‘”",Electronics:"ðŸ“±",Mobiles:"ðŸ“±","Mobile Accessories":"ðŸ“±",Laptops:"ðŸ’»","Laptop Accessories":"ðŸ’»",Beauty:"ðŸ’„",Footwear:"ðŸ‘Ÿ",Home:"ðŸ ",Kitchen:"ðŸ³",Grocery:"ðŸ›’",Accessories:"ðŸ‘œ",Kids:"ðŸ§¸",Sports:"âš½",Bags:"ðŸ‘œ",Jewellery:"ðŸ’Ž",Watches:"âŒš"})[item] || "ðŸ›ï¸"}</span> {item}
+                <span className="category-icon">{({All:"🛍️",Women:"👗",Men:"👔",Electronics:"📱",Mobiles:"📱","Mobile Accessories":"📱",Laptops:"💻","Laptop Accessories":"💻",Beauty:"💄",Footwear:"👟",Home:"🏠",Kitchen:"🍳",Grocery:"🛒",Accessories:"👜",Kids:"🧸",Sports:"⚽",Bags:"👜",Jewellery:"💎",Watches:"⌚"})[item] || "🛍️"}</span> {item}
               </button>
             )
           )}
@@ -1393,7 +1393,7 @@ function StoreApp() {
             {totalProducts
               ? (page - 1) * PRODUCTS_PER_PAGE + 1
               : 0}
-            â€“
+            –
             {Math.min(
               page * PRODUCTS_PER_PAGE,
               totalProducts
@@ -1513,8 +1513,8 @@ function StoreApp() {
                       {wishlist.includes(
                         product.id
                       )
-                        ? "â™¥"
-                        : "â™¡"}
+                        ? "♥"
+                        : "♡"}
                     </button>
                   </div>
 
@@ -1536,11 +1536,11 @@ function StoreApp() {
                   )}
 
                   <div className="rating">
-                      â˜…{" "}
+                      ★{" "}
                       {
                         product.rating
                       }{" "}
-                      Â·{" "}
+                      ·{" "}
                       {
                         product.reviews
                       }{" "}
@@ -1581,7 +1581,7 @@ function StoreApp() {
                         className="primary buy-now-card"
                         onClick={() => buyNow(product)}
                       >
-                        âš¡ Buy Now
+                        ⚡ Buy Now
                       </button>
                       <button
                         className="secondary"
@@ -1594,7 +1594,7 @@ function StoreApp() {
                         disabled={Number(product.stock) <= 0 && getProductSizes(product).length === 0}
                         onClick={() => addToCart(product)}
                       >
-                        ðŸ›’ Add to Cart
+                        🛒 Add to Cart
                       </button>
                     </div>
                   </div>
@@ -1617,7 +1617,7 @@ function StoreApp() {
                 )
               }
             >
-              â€¹
+              ‹
             </button>
 
             {Array.from(
@@ -1689,20 +1689,20 @@ function StoreApp() {
                 )
               }
             >
-              â€º
+              ›
             </button>
           </div>
         )}
       </main>
 
       <footer className="footer">
-        <div className="footer-brand">ðŸ‡®ðŸ‡³ <strong>{homepage.settings.company_name || "MEESHO SHOPPING"}</strong></div>
+        <div className="footer-brand">🇮🇳 <strong>{homepage.settings.company_name || "MEESHO SHOPPING"}</strong></div>
         <p>{homepage.settings.company_about || "Your trusted online shopping destination."}</p>
         <div className="footer-contact">
-          <a href={`mailto:${homepage.settings.contact_email || "meeshoshoppinginfo@gmail.com"}`}>ðŸ“§ {homepage.settings.contact_email || "meeshoshoppinginfo@gmail.com"}</a>
-          <a href={homepage.settings.telegram_url || "https://t.me/MeeshooShopping"} target="_blank" rel="noreferrer">âœˆï¸ Telegram</a>
+          <a href={`mailto:${homepage.settings.contact_email || "meeshoshoppinginfo@gmail.com"}`}>📧 {homepage.settings.contact_email || "meeshoshoppinginfo@gmail.com"}</a>
+          <a href={homepage.settings.telegram_url || "https://t.me/MeeshooShopping"} target="_blank" rel="noreferrer">✈️ Telegram</a>
         </div>
-        <div className="footer-links">About Us â€¢ Product Details â€¢ Shipping â€¢ Returns â€¢ Privacy â€¢ Terms</div>
+        <div className="footer-links">About Us • Product Details • Shipping • Returns • Privacy • Terms</div>
       </footer>
 
       {notice && (
@@ -1739,7 +1739,7 @@ function StoreApp() {
                   )
                 }
               >
-                Ã—
+                ×
               </button>
             </div>
 
@@ -1882,7 +1882,7 @@ function StoreApp() {
                       }
                       onClick={() => buyNow(selectedProduct, selectedSize, selectedColor, selectedVariants)}
                     >
-                      âš¡ BUY NOW
+                      ⚡ BUY NOW
                     </button>
                     <button
                       className="secondary cart-large"
@@ -1893,16 +1893,16 @@ function StoreApp() {
                       }
                       onClick={() => addToCart(selectedProduct, selectedSize, selectedColor, selectedVariants)}
                     >
-                      ðŸ›’ ADD TO CART
+                      🛒 ADD TO CART
                     </button>
                   </div>
 
                   <div className="rating">
-                    â˜…{" "}
+                    ★{" "}
                     {
                       selectedProduct.rating
                     }{" "}
-                    Â·{" "}
+                    ·{" "}
                     {
                       selectedProduct.reviews
                     }{" "}
@@ -1938,7 +1938,7 @@ function StoreApp() {
                       <h3>Customer Reviews</h3>
                       {homepage.settings.reviews_catalog.filter((r) => String(r.product_id) === String(selectedProduct.id) && r.active !== false).map((r) => (
                         <div className="review-card" key={r.id}>
-                          <strong>{r.name}</strong> <span>{"â˜…".repeat(Number(r.stars || 5))}</span>
+                          <strong>{r.name}</strong> <span>{"★".repeat(Number(r.stars || 5))}</span>
                           <p>{r.text}</p>
                         </div>
                       ))}
@@ -1951,11 +1951,11 @@ function StoreApp() {
                       ? (() => {
                           const entry = getProductSizes(selectedProduct).find((x) => String(x.size).toUpperCase() === selectedSize);
                           return entry && Number(entry.stock || 0) > 0
-                            ? `Size ${selectedSize} Â· ${entry.stock} available`
+                            ? `Size ${selectedSize} · ${entry.stock} available`
                             : "Select an available size";
                         })()
                       : Number(selectedProduct.stock) > 0
-                      ? `In Stock Â· ${selectedProduct.stock} available`
+                      ? `In Stock · ${selectedProduct.stock} available`
                       : "Currently out of stock"}
                   </p>
 
@@ -1969,7 +1969,7 @@ function StoreApp() {
                     {suggestedProducts.map((product) => (
                       <article className="mini-card" key={`suggest-${product.id}`} onClick={() => openProduct(product)}>
                         <img src={product.images?.[0] || "https://images.unsplash.com/photo-1472851294608-062f824d29cc?w=900&q=85"} alt={product.name} />
-                        <div className="mini-card-body"><strong>{product.name}</strong><span>â˜… {product.rating || 4.5}</span><b>{formatPrice(product.price)}</b></div>
+                        <div className="mini-card-body"><strong>{product.name}</strong><span>★ {product.rating || 4.5}</span><b>{formatPrice(product.price)}</b></div>
                       </article>
                     ))}
                   </div>
@@ -2029,7 +2029,7 @@ function StoreApp() {
                               changeQuantity(item.id, -1, item.size, item.color, item.variants)
                             }
                           >
-                            âˆ’
+                            −
                           </button>
 
                           <strong>
@@ -2456,7 +2456,7 @@ function Modal({
             className="close"
             onClick={close}
           >
-            Ã—
+            ×
           </button>
         </div>
 
@@ -2526,7 +2526,7 @@ function AdminApp() {
     offer_image: "",
     desktop_banner: "",
     mobile_banner: "",
-    best_selling_title: "ðŸ”¥ Best Selling Products",
+    best_selling_title: "🔥 Best Selling Products",
     company_name: "MEESHO SHOPPING",
     company_about: "Your trusted online shopping destination.",
     contact_email: "meeshoshoppinginfo@gmail.com",
@@ -3572,7 +3572,7 @@ function AdminApp() {
                   label="Products"
                   value={
                     dashboard?.products ??
-                    "â€”"
+                    "—"
                   }
                 />
 
@@ -3580,7 +3580,7 @@ function AdminApp() {
                   label="Customers"
                   value={
                     dashboard?.customers ??
-                    "â€”"
+                    "—"
                   }
                 />
 
@@ -3588,7 +3588,7 @@ function AdminApp() {
                   label="Orders"
                   value={
                     dashboard?.orders ??
-                    "â€”"
+                    "—"
                   }
                 />
 
@@ -3596,7 +3596,7 @@ function AdminApp() {
                   label="Pending Payments"
                   value={
                     dashboard?.pending_payments ??
-                    "â€”"
+                    "—"
                   }
                 />
               </div>
@@ -3796,7 +3796,7 @@ function AdminApp() {
                       <span className="muted">Quick sizes:</span>
                       <button type="button" className="secondary" onClick={() => addPresetSizes("clothing")}>S M L XL XXL</button>
                       <button type="button" className="secondary" onClick={() => addPresetSizes("pants")}>28 30 32 34 36</button>
-                      <button type="button" className="secondary" onClick={() => addPresetSizes("shoes")}>Shoes 6â€“11</button>
+                      <button type="button" className="secondary" onClick={() => addPresetSizes("shoes")}>Shoes 6–11</button>
                       <button type="button" className="secondary" onClick={() => addPresetSizes("belt")}>Belt</button>
                       <button type="button" className="secondary" onClick={() => addPresetSizes("oneSize")}>One Size</button>
                     </div>
@@ -4046,7 +4046,7 @@ function AdminApp() {
                             <td>
                               <strong>{product.stock}</strong>
                               {getProductSizes(product).length > 0 && (
-                                <small className="muted">{getProductSizes(product).map((x) => `${x.size}:${x.stock}`).join(" Â· ")}</small>
+                                <small className="muted">{getProductSizes(product).map((x) => `${x.size}:${x.stock}`).join(" · ")}</small>
                               )}
                             </td>
 
@@ -4254,7 +4254,7 @@ function AdminApp() {
                                 <details className="order-items-details">
                                   <summary>View items</summary>
                                   {order.items.map((item, idx) => (
-                                    <div key={idx}>{item.name}{item.size ? ` Â· ${item.size}` : ""}{item.color ? ` Â· ${item.color}` : ""}{Object.entries(item.variants || {}).map(([name, value]) => ` Â· ${name}: ${value}`).join("")} Ã— {item.quantity} â€” {formatPrice(item.line_total ?? Number(item.price || 0) * Number(item.quantity || 0))}</div>
+                                    <div key={idx}>{item.name}{item.size ? ` · ${item.size}` : ""}{item.color ? ` · ${item.color}` : ""}{Object.entries(item.variants || {}).map(([name, value]) => ` · ${name}: ${value}`).join("")} × {item.quantity} — {formatPrice(item.line_total ?? Number(item.price || 0) * Number(item.quantity || 0))}</div>
                                   ))}
                                 </details>
                               )}
@@ -4384,8 +4384,8 @@ function AdminApp() {
                 </div>
                 <div className="field"><label>Banner Description / Discount Text</label><textarea rows="3" value={homepageAdmin.offer_text || ""} onChange={(e)=>setHomepageAdmin(v=>({...v,offer_text:e.target.value}))}/></div>
                 <div className="banner-upload-grid">
-                  <div className="field"><label>Desktop Banner â€” Direct Photo Upload</label><input type="file" accept="image/*" onChange={(e)=>handleHomepageImageFile(e,"desktop_banner")} disabled={formLoading}/><small className="muted">Computer/Desktop banner photo. URL à¤•à¥€ à¤œà¤°à¥‚à¤°à¤¤ à¤¨à¤¹à¥€à¤‚à¥¤</small>{homepageAdmin.desktop_banner && <img className="admin-banner-preview" src={homepageAdmin.desktop_banner} alt="Desktop banner preview"/>}</div>
-                  <div className="field"><label>Mobile Banner â€” Direct Photo Upload</label><input type="file" accept="image/*" onChange={(e)=>handleHomepageImageFile(e,"mobile_banner")} disabled={formLoading}/><small className="muted">Phone/mobile banner photo. URL à¤•à¥€ à¤œà¤°à¥‚à¤°à¤¤ à¤¨à¤¹à¥€à¤‚à¥¤</small>{homepageAdmin.mobile_banner && <img className="admin-banner-preview mobile" src={homepageAdmin.mobile_banner} alt="Mobile banner preview"/>}</div>
+                  <div className="field"><label>Desktop Banner — Direct Photo Upload</label><input type="file" accept="image/*" onChange={(e)=>handleHomepageImageFile(e,"desktop_banner")} disabled={formLoading}/><small className="muted">Computer/Desktop banner photo. URL की जरूरत नहीं।</small>{homepageAdmin.desktop_banner && <img className="admin-banner-preview" src={homepageAdmin.desktop_banner} alt="Desktop banner preview"/>}</div>
+                  <div className="field"><label>Mobile Banner — Direct Photo Upload</label><input type="file" accept="image/*" onChange={(e)=>handleHomepageImageFile(e,"mobile_banner")} disabled={formLoading}/><small className="muted">Phone/mobile banner photo. URL की जरूरत नहीं।</small>{homepageAdmin.mobile_banner && <img className="admin-banner-preview mobile" src={homepageAdmin.mobile_banner} alt="Mobile banner preview"/>}</div>
                 </div>
                 <div className="admin-control-grid">
                   <label className="checkbox-row"><input type="checkbox" checked={homepageAdmin.show_banner !== false} onChange={(e)=>setHomepageAdmin(v=>({...v,show_banner:e.target.checked}))}/> Show big homepage banner</label>
@@ -4417,7 +4417,7 @@ function AdminApp() {
               <AdminTitle title="Review Management" subtitle="Add, edit, hide or delete product reviews from one place." />
               <div className="admin-card">
                 <div className="form-grid">
-                  <div className="field"><label>Product</label><select value={homepageAdmin.review_product_id || ""} onChange={(e)=>setHomepageAdmin(v=>({...v,review_product_id:e.target.value}))}><option value="">Select product</option>{adminProducts.map((p)=><option key={p.id} value={p.id}>{p.name} â€” {p.id}</option>)}</select></div>
+                  <div className="field"><label>Product</label><select value={homepageAdmin.review_product_id || ""} onChange={(e)=>setHomepageAdmin(v=>({...v,review_product_id:e.target.value}))}><option value="">Select product</option>{adminProducts.map((p)=><option key={p.id} value={p.id}>{p.name} — {p.id}</option>)}</select></div>
                   <AdminField label="Customer Name" value={homepageAdmin.review_name || ""} onChange={(e)=>setHomepageAdmin(v=>({...v,review_name:e.target.value}))} placeholder="Customer name" />
                   <AdminField label="Stars (1-5)" type="number" value={homepageAdmin.review_stars || 5} onChange={(e)=>setHomepageAdmin(v=>({...v,review_stars:Math.max(1,Math.min(5,Number(e.target.value)||5))}))} />
                 </div>
@@ -4430,7 +4430,7 @@ function AdminApp() {
                 }}>+ Add Review</button>
                 <div className="table-wrap" style={{marginTop:16}}>
                   <table><thead><tr><th>Product ID</th><th>Name</th><th>Stars</th><th>Review</th><th>Status</th><th>Action</th></tr></thead><tbody>
-                    {(homepageAdmin.reviews_catalog||[]).map((r,i)=><tr key={r.id||i}><td>{r.product_id}</td><td>{r.name}</td><td>{"â˜…".repeat(Number(r.stars||5))}</td><td>{r.text}</td><td>{r.active===false?"Hidden":"Visible"}</td><td><button className="secondary" onClick={()=>setHomepageAdmin(v=>({...v,reviews_catalog:(v.reviews_catalog||[]).map((x,j)=>j===i?{...x,active:x.active===false}:x)}))}>{r.active===false?"Show":"Hide"}</button> <button className="danger" onClick={()=>setHomepageAdmin(v=>({...v,reviews_catalog:(v.reviews_catalog||[]).filter((_,j)=>j!==i)}))}>Delete</button></td></tr>)}
+                    {(homepageAdmin.reviews_catalog||[]).map((r,i)=><tr key={r.id||i}><td>{r.product_id}</td><td>{r.name}</td><td>{"★".repeat(Number(r.stars||5))}</td><td>{r.text}</td><td>{r.active===false?"Hidden":"Visible"}</td><td><button className="secondary" onClick={()=>setHomepageAdmin(v=>({...v,reviews_catalog:(v.reviews_catalog||[]).map((x,j)=>j===i?{...x,active:x.active===false}:x)}))}>{r.active===false?"Show":"Hide"}</button> <button className="danger" onClick={()=>setHomepageAdmin(v=>({...v,reviews_catalog:(v.reviews_catalog||[]).filter((_,j)=>j!==i)}))}>Delete</button></td></tr>)}
                   </tbody></table>
                 </div>
                 <button className="primary" style={{marginTop:14}} onClick={saveHomepageAdmin} disabled={formLoading}>Save Reviews</button>
@@ -4445,7 +4445,7 @@ function AdminApp() {
                 <form onSubmit={createGiftCode}>
                   <div className="form-grid">
                     <div className="field"><label>Gift Code</label><input value={giftForm.code} onChange={e => setGiftForm(v => ({...v, code:e.target.value.toUpperCase()}))} placeholder="WELCOME10" required /></div>
-                    <div className="field"><label>Eligible Product</label><select value={giftForm.product_id} onChange={e => setGiftForm(v => ({...v, product_id:e.target.value}))} required><option value="">Select product</option>{adminProducts.map(p => <option key={p.id} value={p.id}>{p.name} — {p.id}</option>)}</select></div>
+                    <div className="field"><label>Eligible Product</label><select value={giftForm.product_id} onChange={e => setGiftForm(v => ({...v, product_id:e.target.value}))} required><option value="">Select product</option>{adminProducts.map(p => <option key={p.id} value={p.id}>{p.name} · {p.id}</option>)}</select></div>
                     <div className="field"><label>Discount Type</label><select value={giftForm.discount_type} onChange={e => setGiftForm(v => ({...v, discount_type:e.target.value}))}><option value="percent">Percentage (%)</option><option value="amount">Fixed Amount (INR)</option></select></div>
                     <div className="field"><label>Discount Value</label><input type="number" min="0.01" max={giftForm.discount_type === "percent" ? 100 : undefined} step="0.01" value={giftForm.discount_value} onChange={e => setGiftForm(v => ({...v, discount_value:e.target.value}))} required /></div>
                     <div className="field"><label>Maximum Uses</label><input type="number" min="1" step="1" value={giftForm.max_uses} onChange={e => setGiftForm(v => ({...v, max_uses:e.target.value}))} required /></div>
@@ -4466,7 +4466,7 @@ function AdminApp() {
             <section>
               <AdminTitle title="Security Log" subtitle="Recent admin login attempts. Passwords are never stored here." />
               <div className="admin-card table-wrap">
-                <table><thead><tr><th>Time</th><th>Email</th><th>IP</th><th>Status</th><th>User Agent</th></tr></thead><tbody>{securityLogs.map(log=><tr key={log.id}><td>{new Date(log.created_at).toLocaleString()}</td><td>{log.email || "â€”"}</td><td>{log.ip_address || "â€”"}</td><td>{log.success ? "ðŸŸ¢ Success" : "ðŸ”´ Failed"}</td><td>{log.user_agent || "â€”"}</td></tr>)}</tbody></table></div>
+                <table><thead><tr><th>Time</th><th>Email</th><th>IP</th><th>Status</th><th>User Agent</th></tr></thead><tbody>{securityLogs.map(log=><tr key={log.id}><td>{new Date(log.created_at).toLocaleString()}</td><td>{log.email || "—"}</td><td>{log.ip_address || "—"}</td><td>{log.success ? "🟢 Success" : "🔴 Failed"}</td><td>{log.user_agent || "—"}</td></tr>)}</tbody></table></div>
             </section>
           )}
 
