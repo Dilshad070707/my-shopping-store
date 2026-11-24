@@ -590,6 +590,22 @@ async function initializeDatabase() {
     )
   `);
 
+  /* GIFT CODES */
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS store_gift_codes (
+      id BIGSERIAL PRIMARY KEY,
+      code VARCHAR(60) UNIQUE NOT NULL,
+      product_id VARCHAR(100),
+      discount_type VARCHAR(20) NOT NULL DEFAULT 'percent',
+      discount_value NUMERIC(10,2) NOT NULL DEFAULT 0,
+      max_uses INTEGER NOT NULL DEFAULT 1,
+      used_count INTEGER NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      expires_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
   /* ORDERS */
 
   await pool.query(`
@@ -680,6 +696,16 @@ async function initializeDatabase() {
         stock_released BOOLEAN
         NOT NULL
         DEFAULT FALSE
+,
+
+      ADD COLUMN IF NOT EXISTS
+        subtotal NUMERIC(10,2) NOT NULL DEFAULT 0,
+
+      ADD COLUMN IF NOT EXISTS
+        discount_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+
+      ADD COLUMN IF NOT EXISTS
+        gift_code VARCHAR(60)
   `);
 
   /* PRODUCTS */
@@ -1669,6 +1695,45 @@ app.get(
    CREATE UPI ORDER
    ========================================================= */
 
+app.post("/api/gift-codes/validate", async (req, res) => {
+  try {
+    const code = String(req.body.code || "").trim().toUpperCase();
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
+    if (!code || !items.length) return res.status(400).json({ message: "Enter a gift code and add eligible products to your cart." });
+
+    const result = await pool.query(
+      `SELECT * FROM store_gift_codes WHERE UPPER(code) = $1 LIMIT 1`, [code]
+    );
+    const gift = result.rows[0];
+    if (!gift || !gift.active) return res.status(404).json({ message: "This gift code is invalid or disabled." });
+    if (gift.expires_at && new Date(gift.expires_at).getTime() <= Date.now()) return res.status(400).json({ message: "This gift code has expired." });
+    if (Number(gift.used_count) >= Number(gift.max_uses)) return res.status(400).json({ message: "This gift code has reached its usage limit." });
+
+    const productIds = [...new Set(items.map(item => String(item.id || "")))].filter(Boolean);
+    if (!productIds.includes(String(gift.product_id))) return res.status(400).json({ message: "This code is valid only for its selected product. Add that product to your cart." });
+
+    const productResult = await pool.query(
+      `SELECT id, price FROM store_products WHERE id::text = $1 AND active = TRUE LIMIT 1`,
+      [String(gift.product_id)]
+    );
+    if (!productResult.rows.length) return res.status(400).json({ message: "The product for this gift code is currently unavailable." });
+
+    const qty = items.filter(item => String(item.id) === String(gift.product_id))
+      .reduce((sum, item) => sum + Math.max(0, Math.min(99, Number.parseInt(item.quantity, 10) || 0)), 0);
+    const eligibleSubtotal = money(Number(productResult.rows[0].price) * qty);
+    if (eligibleSubtotal <= 0) return res.status(400).json({ message: "This gift code does not apply to the current cart." });
+
+    const discount = money(Math.min(eligibleSubtotal, gift.discount_type === "amount"
+      ? Number(gift.discount_value)
+      : eligibleSubtotal * Number(gift.discount_value) / 100));
+
+    return res.json({ success: true, code: gift.code, product_id: gift.product_id, discount_amount: discount,
+      message: "Gift code applied. Final discount will be verified when you place the order." });
+  } catch (error) {
+    console.error("Gift code validation error:", error.message);
+    return res.status(500).json({ message: "Unable to validate this gift code right now." });
+  }
+});
 app.post(
   "/api/payments/create-order",
   async (req, res) => {
@@ -1679,6 +1744,8 @@ app.post(
       const customer =
         req.body.customer ||
         {};
+
+      const giftCodeInput = String(req.body.gift_code || "").trim().toUpperCase();
 
       const address =
         req.body.address ||
@@ -1984,6 +2051,65 @@ app.post(
           calculatedAmount
         );
 
+      const subtotalAmount = calculatedAmount;
+      let discountAmount = 0;
+      let appliedGiftCode = null;
+
+      if (giftCodeInput) {
+        const giftResult = await client.query(
+          `SELECT * FROM store_gift_codes
+           WHERE UPPER(code) = $1
+           FOR UPDATE`,
+          [giftCodeInput]
+        );
+
+        const gift = giftResult.rows[0];
+
+        if (!gift || !gift.active) {
+          throw new Error("This gift code is invalid or disabled.");
+        }
+
+        if (gift.expires_at && new Date(gift.expires_at).getTime() <= Date.now()) {
+          throw new Error("This gift code has expired.");
+        }
+
+        if (Number(gift.used_count) >= Number(gift.max_uses)) {
+          throw new Error("This gift code has reached its usage limit.");
+        }
+
+        const eligibleItems = verifiedItems.filter(
+          item => String(item.id) === String(gift.product_id)
+        );
+
+        if (!eligibleItems.length) {
+          throw new Error("This gift code is valid only for its selected product.");
+        }
+
+        const eligibleSubtotal = money(
+          eligibleItems.reduce((sum, item) => sum + Number(item.line_total || 0), 0)
+        );
+
+        discountAmount = money(Math.min(
+          eligibleSubtotal,
+          gift.discount_type === "amount"
+            ? Number(gift.discount_value)
+            : eligibleSubtotal * Number(gift.discount_value) / 100
+        ));
+
+        if (discountAmount <= 0 || discountAmount >= subtotalAmount) {
+          throw new Error("This gift code cannot be applied to this order amount.");
+        }
+
+        calculatedAmount = money(subtotalAmount - discountAmount);
+        appliedGiftCode = gift.code;
+
+        await client.query(
+          `UPDATE store_gift_codes
+           SET used_count = used_count + 1
+           WHERE id = $1`,
+          [gift.id]
+        );
+      }
       if (
         calculatedAmount <=
         0
@@ -2038,6 +2164,9 @@ app.post(
             address,
             items,
             amount,
+            subtotal,
+            discount_amount,
+            gift_code,
             payment_status,
             payment_method,
             order_status
@@ -2052,6 +2181,9 @@ app.post(
             $5,
             $6,
             $7,
+            $8,
+            $9,
+            $10,
             'PENDING_PAYMENT',
             'UPI',
             'NEW'
@@ -2077,6 +2209,9 @@ app.post(
           ),
 
           calculatedAmount,
+          subtotalAmount,
+          discountAmount,
+          appliedGiftCode,
         ]
       );
 
@@ -2094,6 +2229,15 @@ app.post(
 
           amount:
             calculatedAmount,
+
+          subtotal:
+            subtotalAmount,
+
+          discount_amount:
+            discountAmount,
+
+          gift_code:
+            appliedGiftCode,
 
           payment: {
             method:
@@ -3262,6 +3406,72 @@ app.get(
   }
 );
 
+/* ADMIN GIFT CODES */
+app.get("/api/admin/gift-codes", requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM store_gift_codes ORDER BY created_at DESC`
+    );
+    return res.json({ success: true, gift_codes: result.rows });
+  } catch (error) {
+    return res.status(500).json({ message: "Unable to load gift codes." });
+  }
+});
+
+app.post("/api/admin/gift-codes", requireAdmin, async (req, res) => {
+  try {
+    const code = String(req.body.code || "").trim().toUpperCase();
+    const productId = String(req.body.product_id || "").trim();
+    const discountType = String(req.body.discount_type || "percent");
+    const discountValue = Number(req.body.discount_value);
+    const maxUses = Number.parseInt(req.body.max_uses, 10);
+    const expiresAt = req.body.expires_at || null;
+
+    if (!code || !productId || !["percent", "amount"].includes(discountType) ||
+        !Number.isFinite(discountValue) || discountValue <= 0 ||
+        (discountType === "percent" && discountValue > 100) ||
+        !Number.isInteger(maxUses) || maxUses < 1) {
+      return res.status(400).json({ message: "Please enter valid gift code details." });
+    }
+
+    const product = await pool.query(
+      `SELECT id FROM store_products WHERE id::text = $1 AND active = TRUE LIMIT 1`,
+      [productId]
+    );
+    if (!product.rows.length) {
+      return res.status(400).json({ message: "Selected product is unavailable." });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO store_gift_codes
+       (code, product_id, discount_type, discount_value, max_uses, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [code, productId, discountType, discountValue, maxUses, expiresAt]
+    );
+    return res.status(201).json({ success: true, gift_code: result.rows[0] });
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({ message: "This gift code already exists." });
+    }
+    return res.status(500).json({ message: "Unable to create gift code." });
+  }
+});
+
+app.patch("/api/admin/gift-codes/:id", requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE store_gift_codes SET active = NOT active
+       WHERE id = $1 RETURNING *`,
+      [req.params.id]
+    );
+    if (!result.rows.length) {
+      return res.status(404).json({ message: "Gift code not found." });
+    }
+    return res.json({ success: true, gift_code: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: "Unable to update gift code." });
+  }
+});
 /* =========================================================
    ADMIN HOMEPAGE SETTINGS / LOGIN AUDIT
    ========================================================= */
